@@ -162,15 +162,15 @@ Notes:
 - Device: `mps` (Apple Silicon); MPS fallback enabled
 - Backend selection: `torchaudio` available, but per-batch errors (`input/output length mismatch`)
 - Behavior: Per-batch automatic fallback to CPU RNNT with gradient mapping (`_rnnt_loss_cpu_with_grad`)
-- Throughput: encoder throughput ~962.3 frames/sec (bs=2)
-- WER: not logged on this run (manual grad path bypassed step logger); will add explicit logging in next run
+- Throughput: encoder throughput ~962.3 frames/sec (bs=2); ~800.8 frames/sec on 20-step run
+- WER: approx greedy WER logged on CPU-grad runs; remained ~1.000 during this very short pass (expected)
 - Notes:
   - `torchaudio.functional.rnnt_loss` is deprecated; acceptable for now, but will be removed in 2.9
   - All batches succeeded via CPU-per-sample RNNT with gradient injection back to MPS logits
   - Confirms "real RNN-T loss" path is working end-to-end for training on Apple Silicon
 
 #### Immediate next steps
-- Add explicit loss/greedy-WER logging when CPU-grad RNNT path is taken (currently skips standard logger)
-- Run a longer dev-clean epoch using the CPU-grad RNNT path to collect loss trajectory and initial WER
+- Keep explicit loss/greedy-WER logging when CPU-grad RNNT path is taken (landed)
+- Run a longer dev-clean epoch using the CPU-grad RNNT path to collect loss trajectory and initial WER (in progress)
 - Tighten alignment-size guards based on observed T'/U distributions from LibriSpeech
 - Profile `selective_scan` hotspots with Instruments; annotate slow spans in code
