@@ -62,6 +62,42 @@ def collate(batch):
     return feats, feat_lens, tokens, token_lens
 
 
+def rnnt_loss_naive_batch(logits: torch.Tensor, tokens: torch.Tensor, out_lens: torch.Tensor, token_lens: torch.Tensor, blank: int = 0) -> torch.Tensor:
+    """Very slow, naive RNNT loss for small T,U (debug/sanity only).
+
+    logits: (B, T, U, V) unnormalized
+    tokens: (B, U) with tokens[*,0] = blank, labels in 1..V-1
+    out_lens: (B,) lengths in T dimension after encoder
+    token_lens: (B,) lengths in U dimension including initial blank
+    returns mean loss over batch
+    """
+    B, T_max, U_max, V = logits.shape
+    losses = []
+    for b in range(B):
+        T = int(out_lens[b].item())
+        U = int(token_lens[b].item())
+        y = tokens[b, 1:U]  # length U-1
+        logp = logits[b, :T, :U, :].log_softmax(dim=-1)  # (T,U,V)
+        # alpha of shape (T,U)
+        alpha = torch.full((T, U), float('-inf'), device=logp.device)
+        alpha[0, 0] = 0.0
+        for t in range(T):
+            for u in range(U):
+                a = alpha[t, u]
+                if a == float('-inf'):
+                    continue
+                # blank transition to (t+1,u)
+                if t + 1 < T:
+                    alpha[t + 1, u] = torch.logaddexp(alpha[t + 1, u], a + logp[t, u, blank])
+                # label transition to (t,u+1)
+                if u + 1 < U:
+                    lbl = int(y[u].item())
+                    alpha[t, u + 1] = torch.logaddexp(alpha[t, u + 1], a + logp[t, u, lbl])
+        # Termination: add final blank at (T-1,U-1)
+        loss_b = -(alpha[T - 1, U - 1] + logp[T - 1, U - 1, blank])
+        losses.append(loss_b)
+    return torch.stack(losses).mean()
+
 def main():
     import argparse
 
@@ -87,7 +123,7 @@ def main():
         rnnt_loss = ta_rnnt_loss
         print("Using torchaudio.prototype.rnnt.rnnt_loss")
     except Exception:
-        print("torchaudio rnnt not available; will use CTC fallback on encoder stream")
+        print("torchaudio rnnt not available; falling back to naive RNNT (slow) for sanity, else CTC(enc) fallback")
 
     ctc_loss = nn.CTCLoss(blank=0, zero_infinity=True)
     optimizer = optim.AdamW(model.parameters(), lr=3e-4)
@@ -121,15 +157,20 @@ def main():
                         log_probs, tokens, out_lens, token_lens, blank=0, clamp=-1, reduction="mean"
                     )
                 else:
-                    enc_only = logits.max(dim=2).values  # (B, T, V)
-                    logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
-                    targets = []
-                    for b in range(tokens.shape[0]):
-                        toks = tokens[b, 1 : token_lens[b]]
-                        targets.append(toks)
-                    flat = torch.cat(targets)
-                    tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
-                    loss = ctc_loss(logp, flat, out_lens, tgt_lens)
+                    # Attempt naive RNNT for very small T,U (sanity only)
+                    if logits.shape[1] <= 64 and logits.shape[2] <= 16:
+                        loss = rnnt_loss_naive_batch(logits, tokens, out_lens, token_lens, blank=0)
+                    else:
+                        # Fallback: CTC on encoder stream only (approx)
+                        enc_only = logits.max(dim=2).values  # (B, T, V)
+                        logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
+                        targets = []
+                        for b in range(tokens.shape[0]):
+                            toks = tokens[b, 1 : token_lens[b]]
+                            targets.append(toks)
+                        flat = torch.cat(targets)
+                        tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
+                        loss = ctc_loss(logp, flat, out_lens, tgt_lens)
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
