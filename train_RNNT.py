@@ -569,9 +569,16 @@ def select_rnnt_backend(preferred: str = "auto"):
     preferred = preferred.lower()
 
     def try_ta():
+        # Prefer prototype API if present
         try:
             from torchaudio.prototype.rnnt import rnnt_loss as ta_rnnt_loss  # type: ignore
             return ta_rnnt_loss, "torchaudio"
+        except Exception:
+            pass
+        # Fallback to torchaudio.functional.rnnt_loss (deprecated but available widely)
+        try:
+            from torchaudio.functional import rnnt_loss as ta_rnnt_loss_fn  # type: ignore
+            return ta_rnnt_loss_fn, "torchaudio"
         except Exception:
             return None
 
@@ -704,17 +711,47 @@ def main():
                     with record_function("rnnt_loss_compute"):
                         log_probs = logits.log_softmax(dim=-1)
                         try:
+                            # torchaudio.functional expects int32 for targets/lengths
+                            t_tokens = tokens
+                            t_out_lens = out_lens
+                            t_tok_lens = token_lens
+                            # For torchaudio RNNT, targets should EXCLUDE leading blank.
+                            # Our tokens include a leading blank for the predictor; adjust here.
+                            try:
+                                import torchaudio  # noqa: F401
+                                from torchaudio.functional import rnnt_loss as _ta_fn  # type: ignore
+                                if rnnt_loss is _ta_fn:
+                                        # Remove leading blank and fix lengths
+                                        t_tokens = tokens[:, 1:].to(torch.int32)
+                                        t_out_lens = out_lens.to(torch.int32)
+                                        t_tok_lens = (token_lens - 1).clamp_min(0).to(torch.int32)
+                            except Exception:
+                                pass
                             loss = rnnt_loss(
-                                log_probs, tokens, out_lens, token_lens, blank=0, clamp=-1, reduction="mean"
+                                log_probs, t_tokens, t_out_lens, t_tok_lens, blank=0, clamp=-1, reduction="mean"
                             )
                         except Exception as e:
-                            # Safe CPU fallback for loss only
+                            # Safe CPU fallback for loss only; if that fails, fall back to CTC
                             print(f"RNN-T backend failed on-device ({e}); retrying loss on CPU.")
-                            lp_cpu = log_probs.detach().to("cpu")
-                            tok_cpu = tokens.detach().to("cpu")
-                            ol_cpu = out_lens.detach().to("cpu")
-                            tl_cpu = token_lens.detach().to("cpu")
-                            loss = rnnt_loss(lp_cpu, tok_cpu, ol_cpu, tl_cpu, blank=0, clamp=-1, reduction="mean").to(log_probs.device)
+                            try:
+                                lp_cpu = log_probs.detach().to("cpu")
+                                # CPU path: also remove leading blank for torchaudio.functional
+                                tok_cpu = tokens[:, 1:].detach().to(torch.int32).to("cpu")
+                                ol_cpu = out_lens.detach().to(torch.int32).to("cpu")
+                                tl_cpu = (token_lens - 1).clamp_min(0).detach().to(torch.int32).to("cpu")
+                                loss = rnnt_loss(lp_cpu, tok_cpu, ol_cpu, tl_cpu, blank=0, clamp=-1, reduction="mean").to(log_probs.device)
+                            except Exception as e2:
+                                print(f"CPU RNN-T loss failed ({e2}); using encoder-CTC fallback for this batch.")
+                                with record_function("ctc_fallback_compute"):
+                                    enc_only = logits.max(dim=2).values  # (B, T, V)
+                                    logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
+                                    targets = []
+                                    for b in range(tokens.shape[0]):
+                                        toks = tokens[b, 1 : token_lens[b]]
+                                        targets.append(toks)
+                                    flat = torch.cat(targets)
+                                    tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
+                                    loss = ctc_loss(logp, flat, out_lens, tgt_lens)
                 else:
                     # Attempt naive RNNT for very small T,U (sanity only)
                     if rnnt_use_naive:
