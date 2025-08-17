@@ -73,9 +73,16 @@ References:
 """
 from __future__ import annotations
 
+import argparse
 import torch
 import torch.nn as nn
-import coremltools as ct
+
+# Core ML Tools is optional during development; wrap import for graceful fallback
+try:
+    import coremltools as ct  # type: ignore
+    HAS_CT = True
+except Exception:
+    HAS_CT = False
 
 
 # Core ML Export Configuration Constants
@@ -225,6 +232,9 @@ def export_to_coreml(
     - Shape mismatches: Clear error messages for debugging
     - Memory constraints: Validation of memory requirements
     """
+    if not HAS_CT:
+        print("coremltools not available; skipping conversion. Install coremltools to enable export.")
+        return
     print(f"Starting Core ML export to {output_path}...")
     pytorch_model.eval()
 
@@ -295,7 +305,18 @@ def export_to_coreml(
     print(f"Core ML model placeholder saved to {output_path}")
 
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", type=str, default="", help="Path to trained/optimized MCT PyTorch model (.pth)")
+    ap.add_argument("--output", type=str, default="MambaASR.mlpackage", help="Output .mlpackage path")
+    ap.add_argument("--chunk_length", type=int, default=CoreMLConstants.DEFAULT_CHUNK_LENGTH)
+    args = ap.parse_args()
+
     print("Mamba-ASR MPS Core ML Export Script")
-    # This script would be called with arguments specifying the trained model
-    # path and desired output path.
-    # For now, this serves as a placeholder for the implementation.
+    if not HAS_CT:
+        print("coremltools not installed; export is a no-op. Install coremltools to proceed.")
+    else:
+        # For now, create a fresh model instance as a placeholder
+        from modules.mct.mct_model import MCTModel, MCTConfig  # type: ignore
+        cfg = MCTConfig()
+        model = MCTModel(cfg)
+        export_to_coreml(model, output_path=args.output, chunk_length=args.chunk_length)
