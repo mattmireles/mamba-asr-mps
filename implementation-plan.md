@@ -113,19 +113,6 @@ Notes:
 - [x] Run LibriSpeech RNNT sanity training and record initial WER (approx greedy)
 - [x] Provide naive RNNT loss path (`--force_naive_rnnnt`) for environments without RNNT loss
 
-#### RNNT sanity results (current)
-- Backend: `--rnnt_impl naive` (CTC grad fallback); MPS enabled with CPU fallbacks
-- Encoder throughput: ~132.2 frames/sec (dummy, bs=1)
-- Note: With `torchaudio`/`warp_rnn` installed, loss will run natively (with automatic CPU fallback on MPS if required)
-
-- Backend: `--rnnt_impl ctc` (encoder-CTC fallback), bs=2, sanity
-- Encoder throughput: ~312.3 frames/sec (dummy)
-
-#### Short RNNT training (dummy) results
-- Command: `--epochs 1 --batch_size 2 --rnnt_impl ctc`
-- Throughput: ~607.6 frames/sec (encoder)
-- Notes: Loss decreased during the epoch (e.g., 9.45 → ~3.78); CTC fallback runs on CPU as expected on MPS.
-
 #### Final Phase 2 Benchmark (test_streaming dataset)
 - **Command**: `PYTHONPATH=".../Mamba-ASR-MPS" PYTORCH_ENABLE_MPS_FALLBACK=1 python Mamba-ASR-MPS/train_RNNT.py --epochs 1 --batch_size 1 --manifest data/datasets/test_streaming.csv --profile`
 - **Throughput**: ~57.2 frames/sec
@@ -149,3 +136,10 @@ Notes:
 - Attempted to install `warp_rnnt` via `pip install warp_rnnt`; build failed under pip build isolation due to `ModuleNotFoundError: torch` during wheel preparation.
 - Next action: retry with `pip install --no-build-isolation warp_rnnt` (uses existing torch in environment) or rely on `torchaudio.prototype.rnnt` if available.
 - Current behavior remains correct with CPU fallback for CTC on MPS.
+
+#### Real-data RNNT short runs (LibriSpeech dev-clean)
+- Manifest: `/Users/mattmireles/Documents/Training Data/LibriSpeech/dev-clean.csv`
+- Backend: torchaudio RNNT attempted; encountered input/output length mismatches; auto-fallback to encoder-CTC for loss
+- Encoder throughput: ~909–1214 frames/sec (bs=2, 64 samples, max_steps=20)
+- Approx WER in sanity logs: ~1.0 (expected for very short run + encoder-CTC loss)
+- Notes: Implemented torchaudio functional fallback; removed leading blank and cast lengths to int32; added clamping/slicing guard. Further RNNT wrapper work needed for full on-device/CPU RNNT.

@@ -302,6 +302,28 @@ class MCTModel(nn.Module):
         output_lengths = torch.clamp(feat_lens // subsampling_factor, min=1)
         
         return rnnt_logits, output_lengths
+
+    def encode_only(
+        self,
+        feats: torch.Tensor,
+        feat_lens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return encoder representations only for KD and analysis.
+
+        Args:
+            feats: Input acoustic features (B, T, feat_dim)
+            feat_lens: Length of each audio sequence (B,)
+
+        Returns:
+            enc: Encoder output features (B, T/4, D)
+            out_lens: Output lengths after frontend subsampling (B,)
+        """
+        # Frontend and encoder path reused from forward()
+        acoustic_features = self.frontend(feats)  # (B, T/4, D)
+        acoustic_encoded = self.encoder(acoustic_features)  # (B, T/4, D)
+        subsampling_factor = RNNTConstants.FRONTEND_SUBSAMPLING  # 4
+        output_lengths = torch.clamp(feat_lens // subsampling_factor, min=1)
+        return acoustic_encoded, output_lengths
     
     def get_model_info(self) -> str:
         """Return comprehensive model information for debugging and analysis."""

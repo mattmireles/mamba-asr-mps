@@ -66,7 +66,7 @@ import csv
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 import torchaudio
 
@@ -81,6 +81,28 @@ class LSRow:
     text: str
 
 
+def _load_transcripts_map(data_dir: Path) -> Dict[str, str]:
+    """Load LibriSpeech transcripts from *.trans.txt files into a dict.
+    Key: utterance id (e.g., '2412-153954-0001'), Value: transcript string.
+    """
+    transcripts: Dict[str, str] = {}
+    for trans_path in data_dir.rglob("*.trans.txt"):
+        try:
+            with trans_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Format: "<utt-id> <transcript>"
+                    parts = line.split(" ", 1)
+                    if len(parts) == 2:
+                        utt_id, text = parts
+                        transcripts[utt_id] = text.strip()
+        except Exception:
+            continue
+    return transcripts
+
+
 def scan_directory_for_wavs_text(data_dir: Path) -> List[LSRow]:
     rows: List[LSRow] = []
     
@@ -91,7 +113,7 @@ def scan_directory_for_wavs_text(data_dir: Path) -> List[LSRow]:
     elif (data_dir / "validation.csv").exists():
         manifest_csv = data_dir / "validation.csv"
     
-    transcriptions = {}
+    transcriptions: Dict[str, str] = {}
     if manifest_csv:
         with manifest_csv.open("r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -101,6 +123,9 @@ def scan_directory_for_wavs_text(data_dir: Path) -> List[LSRow]:
                 audio_filename = Path(row.get("audio_path", "")).name
                 if audio_filename:
                     transcriptions[audio_filename] = row.get("text", "")
+    # Merge LibriSpeech .trans.txt transcripts (by utterance id)
+    # These are authoritative; will override prior empty strings
+    transcripts_map = _load_transcripts_map(data_dir)
 
     # Scan for common audio file types
     audio_extensions = ["*.flac", "*.wav", "*.mp3", "*.m4a"]
@@ -115,15 +140,11 @@ def scan_directory_for_wavs_text(data_dir: Path) -> List[LSRow]:
         except Exception:
             dur = 0.0
         
-        # Get transcription from manifest if available, otherwise look for .txt
-        text = transcriptions.get(wav_path.name, "")
+        # Get transcription: prefer .trans.txt mapping, fallback to CSV-based mapping
+        stem = wav_path.stem  # e.g., 2412-153954-0001
+        text = transcripts_map.get(stem, "")
         if not text:
-            txt_path = wav_path.with_suffix(".txt")
-            if txt_path.exists():
-                try:
-                    text = txt_path.read_text(encoding="utf-8").strip()
-                except Exception:
-                    text = ""
+            text = transcriptions.get(wav_path.name, "")
         
         rows.append(LSRow(str(wav_path), dur, text))
     return rows

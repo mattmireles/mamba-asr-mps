@@ -624,6 +624,9 @@ def main():
     parser.add_argument("--force_naive_rnnt", action="store_true", help="Force small T',U for naive RNNT loss path")
     parser.add_argument("--rnnt_impl", type=str, default="auto", choices=["auto", "torchaudio", "warp_rnnt", "naive", "ctc"], help="Select RNN-T loss implementation")
     parser.add_argument("--max_align", type=int, default=250000, help="Maximum allowed T'*U alignment size before clamping/fallback")
+    parser.add_argument("--max_samples", type=int, default=0, help="Limit number of samples from manifest for a short pass (0 = all)")
+    parser.add_argument("--max_steps", type=int, default=0, help="Limit number of optimizer steps for a short pass (0 = full epoch)")
+    parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
     args = parser.parse_args()
 
     device = get_device()
@@ -637,12 +640,14 @@ def main():
     if args.manifest and HAS_LS:
         try:
             ds = LibriSpeechCSVDataset(args.manifest, tokenizer=tokenizer)
-            dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=ls_collate)
+            if args.max_samples and hasattr(ds, "rows"):
+                ds.rows = ds.rows[: args.max_samples]
+            dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=ls_collate, num_workers=args.num_workers)
             print(f"Loaded LibriSpeech CSV: {args.manifest} ({len(ds)} rows)")
         except Exception as e:
             print(f"Failed to load manifest: {e}. Falling back to dummy dataset.")
             ds = DummyRNNTDataset(num=8 if args.sanity else 64, vocab=tokenizer.vocab_size)
-            dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
+            dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate, num_workers=args.num_workers)
     else:
         ds = DummyRNNTDataset(num=8 if args.sanity else 64, vocab=tokenizer.vocab_size)
         dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
@@ -717,16 +722,26 @@ def main():
                             t_tok_lens = token_lens
                             # For torchaudio RNNT, targets should EXCLUDE leading blank.
                             # Our tokens include a leading blank for the predictor; adjust here.
+                            use_ta_functional = False
                             try:
                                 import torchaudio  # noqa: F401
                                 from torchaudio.functional import rnnt_loss as _ta_fn  # type: ignore
                                 if rnnt_loss is _ta_fn:
-                                        # Remove leading blank and fix lengths
-                                        t_tokens = tokens[:, 1:].to(torch.int32)
-                                        t_out_lens = out_lens.to(torch.int32)
-                                        t_tok_lens = (token_lens - 1).clamp_min(0).to(torch.int32)
+                                    use_ta_functional = True
                             except Exception:
                                 pass
+                            if use_ta_functional:
+                                t_tokens = tokens[:, 1:].to(torch.int32)
+                                t_out_lens = out_lens.to(torch.int32)
+                                t_tok_lens = (token_lens - 1).clamp_min(0).to(torch.int32)
+                                # Ensure lens do not exceed logits dims and slice logits U-dim to max token length
+                                Tcap = log_probs.shape[1]
+                                Ucap = log_probs.shape[2]
+                                t_out_lens = torch.clamp(t_out_lens, max=Tcap)
+                                t_tok_lens = torch.clamp(t_tok_lens, min=0, max=Ucap)
+                                Umax = int(t_tok_lens.max().item()) if t_tok_lens.numel() > 0 else 0
+                                if Umax > 0 and Umax <= Ucap:
+                                    log_probs = log_probs[:, :, :Umax, :]
                             loss = rnnt_loss(
                                 log_probs, t_tokens, t_out_lens, t_tok_lens, blank=0, clamp=-1, reduction="mean"
                             )
@@ -830,6 +845,8 @@ def main():
                         ref_text = tokenizer.normalize(texts[0])
                         log_msg += f" wer~{wer(ref_text, hyp_text):.3f}"
                     print(log_msg)
+                if args.max_steps and (step + 1) >= args.max_steps:
+                    break
 
             if device.type == "mps":
                 torch.mps.synchronize()
