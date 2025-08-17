@@ -203,6 +203,23 @@ Notes:
   - All batches succeeded via CPU-per-sample RNNT with gradient injection back to MPS logits
   - Confirms "real RNN-T loss" path is working end-to-end for training on Apple Silicon
 
+##### Latest RNNT extended run (CPU-grad; dev-clean slice)
+- Command:
+  ```bash
+  PYTORCH_ENABLE_MPS_FALLBACK=1 \
+  PYTHONPATH=".../Mamba-ASR-MPS" \
+  python Mamba-ASR-MPS/train_RNNT.py \
+    --epochs 1 --batch_size 2 \
+    --manifest "/Users/mattmireles/Documents/Training Data/LibriSpeech/dev-clean.csv" \
+    --num_workers 0 --max_samples 512 --max_steps 200 \
+    --device mps --rnnt_impl auto --rnnt_cpu_grad \
+    --eval_after --eval_samples 48
+  ```
+- Throughput: encoder ~1758.2 fps
+- Loss snapshots: 4.58 → 2.88 → 2.84 → 3.08 … ~2.98 by step 190 (noisy; early stage)
+- Greedy WER: mostly ~1.000 (expected this early), transient spikes in-line logs; post-train avg WER over 48 = 1.000
+- Alignment caps observed: T'≈90–334, U≈47–198 → T'·U≈4.2k–66.1k
+
 ##### Alignment observations (from logs)
 - Example caps seen: T'≈211–260, U≈140–165 → T'·U≈29.5k–42.9k per batch max
 - Current guard: `--max_align=250000` is generous; safe for naive path but not needed in our current runs
