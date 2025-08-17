@@ -48,7 +48,12 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd.profiler import record_function
+import os
+from contextlib import nullcontext
+if os.environ.get("MAMBA_DISABLE_RECORD_FUNCTION", "0") == "1":
+    record_function = nullcontext  # type: ignore
+else:
+    from torch.autograd.profiler import record_function  # type: ignore
 
 from .selective_scan_interface import selective_scan, init_hidden
 

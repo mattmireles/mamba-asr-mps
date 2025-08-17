@@ -261,16 +261,15 @@ def export_to_coreml(
     coreml_inputs = [
         ct.TensorType(name="audio_chunk", shape=example_audio.shape),
         ct.TensorType(name="token_in", shape=(1, 1)),
-        ct.StateType(name="predictor_hidden_in", wrapped_type=ct.TensorType(shape=example_hidden.shape)),
+        ct.TensorType(name="predictor_hidden_in", shape=example_hidden.shape),
     ]
 
     # Outputs will include the transcription logits and the output state.
     # The output state from one prediction will be fed as the input state
     # to the next.
     coreml_outputs = [
-        # Logits over time for the given token_in (T' = chunk_length/4)
-        ct.TensorType(name="logits_time", shape=(1, max(1, chunk_length // 4), 1, CoreMLConstants.DEFAULT_VOCAB_SIZE)),
-        ct.StateType(name="predictor_hidden_out", wrapped_type=ct.TensorType(shape=example_hidden.shape)),
+        ct.TensorType(name="logits_time"),
+        ct.TensorType(name="predictor_hidden_out"),
     ]
 
 

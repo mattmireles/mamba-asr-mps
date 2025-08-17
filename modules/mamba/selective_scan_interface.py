@@ -38,7 +38,12 @@ from __future__ import annotations
 from typing import Tuple
 
 import torch
-from torch.autograd.profiler import record_function
+import os
+from contextlib import nullcontext
+if os.environ.get("MAMBA_DISABLE_RECORD_FUNCTION", "0") == "1":
+    record_function = nullcontext  # type: ignore
+else:
+    from torch.autograd.profiler import record_function  # type: ignore
 import torch.nn.functional as F
 
 
