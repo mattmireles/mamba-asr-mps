@@ -109,7 +109,10 @@ Notes:
   - CTC ~ 689 frames/s (bs=1, T=800)
   - RNNT(enc-ctc) ~ 409 frames/s (bs=1, T=600, U=30)
 - [x] Prepare profiling trace and identify selective_scan hotspots (via record_function + optional profiler)
-- [ ] Integrate real RNNT loss (torchaudio prototype or warp-transducer) for standard T,U
+ - [x] Integrate real RNNT loss (torchaudio prototype or warp-transducer) for standard T,U
+   - Implemented multi-backend selection in `train_RNNT.py` via `--rnnt_impl {auto,torchaudio,warp_rnnt,naive,ctc}` with safe CPU fallback on MPS
+   - Added alignment size guard (`--max_align`) and profiling spans (`record_function`) around forward, loss, predictor/joiner steps
+   - Naive RNNT path now reports loss value while using encoder-CTC for gradients to avoid MPS autograd issues
 - [x] LibriSpeech-backed RNNT data pipeline using CSV manifests (tokenizer + dataset + collate)
 - [x] Run LibriSpeech RNNT sanity training and record initial WER (approx greedy)
 - [x] Provide naive RNNT loss path (`--force_naive_rnnt`) for environments without RNNT loss

@@ -75,6 +75,7 @@ import time
 import contextlib
 
 from modules.mct.mct_model import MCTModel, MCTConfig
+from torch.autograd.profiler import record_function
 try:
     from datasets.librispeech_csv import LibriSpeechCSVDataset, collate_fn as ls_collate
     HAS_LS = True
@@ -377,12 +378,14 @@ def rnnt_loss_naive_batch(logits: torch.Tensor, tokens: torch.Tensor, out_lens: 
     returns mean loss over batch
     """
     B, T_max, U_max, V = logits.shape
+    # Compute log-probabilities once to keep a simple autograd path
+    log_probs_all = logits.log_softmax(dim=-1).contiguous()
     losses = []
     for b in range(B):
         T = int(out_lens[b].item())
         U = int(token_lens[b].item())
         y = tokens[b, 1:U]  # length U-1
-        logp = logits[b, :T, :U, :].log_softmax(dim=-1)  # (T,U,V)
+        logp = log_probs_all[b, :T, :U, :].contiguous()  # (T,U,V)
         # alpha of shape (T,U)
         alpha = torch.full((T, U), float('-inf'), device=logp.device)
         alpha[0, 0] = 0.0
@@ -403,6 +406,57 @@ def rnnt_loss_naive_batch(logits: torch.Tensor, tokens: torch.Tensor, out_lens: 
         losses.append(loss_b)
     return torch.stack(losses).mean()
 
+
+def select_rnnt_backend(preferred: str = "auto"):
+    """Select and return the best-available RNNT loss backend.
+
+    Order of preference (unless a specific choice is requested):
+    - torchaudio.prototype.rnnt.rnnt_loss
+    - warp_rnnt.rnnt_loss (if installed)
+    - None (caller will fall back to naive/CTC)
+
+    Returns:
+        (callable|None, str): loss function and backend name
+    """
+    preferred = preferred.lower()
+
+    def try_ta():
+        try:
+            from torchaudio.prototype.rnnt import rnnt_loss as ta_rnnt_loss  # type: ignore
+            return ta_rnnt_loss, "torchaudio"
+        except Exception:
+            return None
+
+    def try_warp():
+        # Best-effort: only attempt canonical package name
+        try:
+            from warp_rnnt import rnnt_loss as warp_rnnt_loss  # type: ignore
+            return warp_rnnt_loss, "warp_rnnt"
+        except Exception:
+            return None
+
+    if preferred == "torchaudio":
+        res = try_ta()
+        if res:
+            return res
+        return None, "none"
+    if preferred == "warp_rnnt":
+        res = try_warp()
+        if res:
+            return res
+        return None, "none"
+    if preferred in ("naive", "ctc"):
+        return None, preferred
+
+    # auto
+    res = try_ta()
+    if res:
+        return res
+    res = try_warp()
+    if res:
+        return res
+    return None, "none"
+
 def main():
     import argparse
 
@@ -410,8 +464,11 @@ def main():
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--sanity", action="store_true")
+    parser.add_argument("--profile", action="store_true", help="Enable MPS profiler context where available")
     parser.add_argument("--manifest", type=str, default="", help="Path to LibriSpeech CSV manifest for RNNT training")
     parser.add_argument("--force_naive_rnnt", action="store_true", help="Force small T',U for naive RNNT loss path")
+    parser.add_argument("--rnnt_impl", type=str, default="auto", choices=["auto", "torchaudio", "warp_rnnt", "naive", "ctc"], help="Select RNN-T loss implementation")
+    parser.add_argument("--max_align", type=int, default=250000, help="Maximum allowed T'*U alignment size before clamping/fallback")
     args = parser.parse_args()
 
     device = get_device()
@@ -429,20 +486,22 @@ def main():
             print(f"Loaded LibriSpeech CSV: {args.manifest} ({len(ds)} rows)")
         except Exception as e:
             print(f"Failed to load manifest: {e}. Falling back to dummy dataset.")
-            ds = DummyRNNTDataset(num=8 if args.sanity else 64)
+            ds = DummyRNNTDataset(num=8 if args.sanity else 64, vocab=tokenizer.vocab_size)
             dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
     else:
-        ds = DummyRNNTDataset(num=8 if args.sanity else 64)
+        ds = DummyRNNTDataset(num=8 if args.sanity else 64, vocab=tokenizer.vocab_size)
         dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
 
-    # Try to import rnnt loss
-    rnnt_loss = None
-    try:
-        from torchaudio.prototype.rnnt import rnnt_loss as ta_rnnt_loss  # type: ignore
-        rnnt_loss = ta_rnnt_loss
-        print("Using torchaudio.prototype.rnnt.rnnt_loss")
-    except Exception:
-        print("torchaudio rnnt not available; falling back to naive RNNT (slow) for sanity, else CTC(enc) fallback")
+    # Select RNNT loss backend
+    rnnt_loss, rnnt_backend = select_rnnt_backend(args.rnnt_impl)
+    if rnnt_backend == "torchaudio":
+        print("Using RNN-T loss backend: torchaudio.prototype.rnnt.rnnt_loss")
+    elif rnnt_backend == "warp_rnnt":
+        print("Using RNN-T loss backend: warp_rnnt.rnnt_loss")
+    elif rnnt_backend in ("naive", "ctc"):
+        print(f"Using RNN-T loss backend: {rnnt_backend} (requested)")
+    else:
+        print("No RNN-T backend available; will use naive (small T,U) or encoder-CTC fallback.")
 
     ctc_loss = nn.CTCLoss(blank=0, zero_infinity=True)
     optimizer = optim.AdamW(model.parameters(), lr=3e-4)
@@ -454,7 +513,7 @@ def main():
         from torch.mps.profiler import profile as mps_profile  # type: ignore
     except Exception:
         mps_profile = contextlib.nullcontext  # type: ignore
-    ctx = mps_profile() if args.sanity else contextlib.nullcontext()
+    ctx = mps_profile() if args.profile else contextlib.nullcontext()
 
     total_frames = 0
     start = time.time()
@@ -473,7 +532,8 @@ def main():
                 tokens = tokens.to(device)
                 token_lens = token_lens.to(device)
 
-                logits, out_lens = model(feats, feat_lens, tokens)
+                with record_function("mct_forward"):
+                    logits, out_lens = model(feats, feat_lens, tokens)
                 # Optionally clamp lengths to force naive RNNT path (for environments without RNNT loss)
                 if args.force_naive_rnnt:
                     # Clamp T' and U to small sizes
@@ -482,27 +542,60 @@ def main():
                     logits = logits[:, :Tprime, :U, :]
                     out_lens = torch.clamp(out_lens, max=Tprime)
                     token_lens = torch.clamp(token_lens, max=U)
+                # Alignment size guard for Apple Silicon memory
+                t_cap = int(out_lens.max().item())
+                u_cap = int(token_lens.max().item())
+                align_size = t_cap * u_cap
+                if align_size > args.max_align and rnnt_backend in ("none", "naive") and not args.force_naive_rnnt:
+                    print(f"Warning: T'*U={align_size} exceeds max_align={args.max_align}; skipping naive RNN-T and using encoder-CTC fallback.")
+                    rnnt_use_naive = False
+                else:
+                    rnnt_use_naive = (rnnt_backend == "naive") or (rnnt_backend == "none" and (logits.shape[1] <= 64 and logits.shape[2] <= 16))
                 # logits: (B, T, U, V)
-                if (not args.force_naive_rnnt) and (rnnt_loss is not None):
-                    log_probs = logits.log_softmax(dim=-1)
-                    loss = rnnt_loss(
-                        log_probs, tokens, out_lens, token_lens, blank=0, clamp=-1, reduction="mean"
-                    )
+                if (not args.force_naive_rnnt) and (rnnt_loss is not None) and (rnnt_backend in ("torchaudio", "warp_rnnt")):
+                    with record_function("rnnt_loss_compute"):
+                        log_probs = logits.log_softmax(dim=-1)
+                        try:
+                            loss = rnnt_loss(
+                                log_probs, tokens, out_lens, token_lens, blank=0, clamp=-1, reduction="mean"
+                            )
+                        except Exception as e:
+                            # Safe CPU fallback for loss only
+                            print(f"RNN-T backend failed on-device ({e}); retrying loss on CPU.")
+                            lp_cpu = log_probs.detach().to("cpu")
+                            tok_cpu = tokens.detach().to("cpu")
+                            ol_cpu = out_lens.detach().to("cpu")
+                            tl_cpu = token_lens.detach().to("cpu")
+                            loss = rnnt_loss(lp_cpu, tok_cpu, ol_cpu, tl_cpu, blank=0, clamp=-1, reduction="mean").to(log_probs.device)
                 else:
                     # Attempt naive RNNT for very small T,U (sanity only)
-                    if logits.shape[1] <= 64 and logits.shape[2] <= 16:
-                        loss = rnnt_loss_naive_batch(logits, tokens, out_lens, token_lens, blank=0)
+                    if rnnt_use_naive:
+                        with record_function("rnnt_loss_naive_compute"):
+                            with torch.no_grad():
+                                rnnt_val = rnnt_loss_naive_batch(logits, tokens, out_lens, token_lens, blank=0)
+                        # Use encoder-CTC to provide gradients while reporting RNNT value
+                        with record_function("ctc_fallback_compute"):
+                            enc_only = logits.max(dim=2).values  # (B, T, V)
+                            logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
+                            targets = []
+                            for b in range(tokens.shape[0]):
+                                toks = tokens[b, 1 : token_lens[b]]
+                                targets.append(toks)
+                            flat = torch.cat(targets)
+                            tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
+                            loss = ctc_loss(logp, flat, out_lens, tgt_lens)
                     else:
                         # Fallback: CTC on encoder stream only (approx)
-                        enc_only = logits.max(dim=2).values  # (B, T, V)
-                        logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
-                        targets = []
-                        for b in range(tokens.shape[0]):
-                            toks = tokens[b, 1 : token_lens[b]]
-                            targets.append(toks)
-                        flat = torch.cat(targets)
-                        tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
-                        loss = ctc_loss(logp, flat, out_lens, tgt_lens)
+                        with record_function("ctc_fallback_compute"):
+                            enc_only = logits.max(dim=2).values  # (B, T, V)
+                            logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
+                            targets = []
+                            for b in range(tokens.shape[0]):
+                                toks = tokens[b, 1 : token_lens[b]]
+                                targets.append(toks)
+                            flat = torch.cat(targets)
+                            tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
+                            loss = ctc_loss(logp, flat, out_lens, tgt_lens)
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -531,9 +624,11 @@ def main():
                                 for t in range(Tprime):
                                     u = 0
                                     while u < 32 and total < max_total:
-                                        pred_step, hidden = model.predictor.forward_streaming(token_cur.unsqueeze(1), hidden)
+                                        with record_function("predictor_step"):
+                                            pred_step, hidden = model.predictor.forward_streaming(token_cur.unsqueeze(1), hidden)
                                         # Join for this (t,u)
-                                        logits_tu = model.joiner(enc_out[:, t:t+1, :], pred_step)  # (1,1,1,V)
+                                        with record_function("joiner_step"):
+                                            logits_tu = model.joiner(enc_out[:, t:t+1, :], pred_step)  # (1,1,1,V)
                                         next_id = int(logits_tu[0, 0, 0].argmax().item())
                                         total += 1
                                         if next_id == RNNTTrainingConstants.RNNT_BLANK_TOKEN:
