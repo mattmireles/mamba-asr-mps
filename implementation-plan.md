@@ -79,6 +79,7 @@ This project is divided into four distinct phases, moving from a basic functiona
   - [ ] Add per-layer sparsity targets and checkpointing
 - [ ] Implement stateful Core ML export logic
 - [x] Add export CLI and guarded `coremltools` import in `scripts/export_coreml.py`
+- [x] Add `MCTModel.streaming_forward(feats_chunk, token_in, hidden)` to support stateful export
 - [ ] Implement stateful wrapper and trace (`streaming_forward` → StateType)
 - [ ] Convert to `.mlpackage`; verify model interface (inputs: audio_chunk, mamba_state_in; outputs: logits, mamba_state_out)
 - [ ] Validate converted model on device and verify ANE execution
