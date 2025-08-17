@@ -19,6 +19,8 @@ import torch.optim as optim
  # torchaudio is only needed for real data pipelines; keep optional
 
 from modules.Conmamba import ConMambaCTC, ConMambaCTCConfig
+import time
+import contextlib
 
 
 def get_device() -> torch.device:
@@ -88,6 +90,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--sanity", action="store_true", help="Run a tiny dummy sanity pass")
+    parser.add_argument("--profile", action="store_true", help="Collect basic MPS profiling trace if available")
     args = parser.parse_args()
 
     device = get_device()
@@ -106,13 +109,30 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=3e-4)
 
     model.train()
-    for epoch in range(args.epochs):
-        for step, batch in enumerate(dl):
-            loss = train_one_step(model, batch, device, criterion, optimizer)
-            if step % 10 == 0:
-                print(f"epoch {epoch} step {step} loss {loss:.4f}")
-        if device.type == "mps":
-            torch.mps.synchronize()
+
+    # Optional MPS profiling
+    try:
+        from torch.mps.profiler import profile as mps_profile  # type: ignore
+    except Exception:
+        mps_profile = contextlib.nullcontext  # type: ignore
+
+    ctx = mps_profile() if args.profile else contextlib.nullcontext()
+
+    total_tokens = 0
+    start = time.time()
+    with ctx:
+        for epoch in range(args.epochs):
+            for step, batch in enumerate(dl):
+                feats, feat_lens, targets, tgt_lens = batch
+                total_tokens += int(feat_lens.sum().item())
+                loss = train_one_step(model, (feats, feat_lens, targets, tgt_lens), device, criterion, optimizer)
+                if step % 10 == 0:
+                    print(f"epoch {epoch} step {step} loss {loss:.4f}")
+            if device.type == "mps":
+                torch.mps.synchronize()
+    elapsed = time.time() - start
+    if elapsed > 0:
+        print(f"throughput ~ {total_tokens/elapsed:.1f} frames/sec (dummy)")
 
 
 if __name__ == "__main__":

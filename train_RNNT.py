@@ -11,6 +11,8 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import time
+import contextlib
 
 from modules.mct.mct_model import MCTModel, MCTConfig
 
@@ -91,45 +93,57 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=3e-4)
 
     model.train()
-    for epoch in range(args.epochs):
-        for step, batch in enumerate(dl):
-            feats, feat_lens, tokens, token_lens = batch
-            feats = feats.to(device)
-            feat_lens = feat_lens.to(device)
-            tokens = tokens.to(device)
-            token_lens = token_lens.to(device)
 
-            logits, out_lens = model(feats, feat_lens, tokens)
-            # logits: (B, T, U, V)
-            if rnnt_loss is not None:
-                # Use RNNT (CPU fallback if needed)
-                log_probs = logits.log_softmax(dim=-1)
-                # RNNT expects flattened or packed; here we use torchaudio prototype API signature
-                loss = rnnt_loss(
-                    log_probs, tokens, out_lens, token_lens, blank=0, clamp=-1, reduction="mean"
-                )
-            else:
-                # Fallback: CTC on encoder stream only (approx)
-                enc_only = logits.max(dim=2).values  # (B, T, V)
-                logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
-                # Build a naive CTC target by removing zeros
-                targets = []
-                for b in range(tokens.shape[0]):
-                    toks = tokens[b, 1 : token_lens[b]]  # skip initial blank
-                    targets.append(toks)
-                flat = torch.cat(targets)
-                tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
-                loss = ctc_loss(logp, flat, out_lens, tgt_lens)
+    # Optional MPS profiling
+    try:
+        from torch.mps.profiler import profile as mps_profile  # type: ignore
+    except Exception:
+        mps_profile = contextlib.nullcontext  # type: ignore
+    ctx = mps_profile() if args.sanity else contextlib.nullcontext()
 
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+    total_frames = 0
+    start = time.time()
+    with ctx:
+        for epoch in range(args.epochs):
+            for step, batch in enumerate(dl):
+                feats, feat_lens, tokens, token_lens = batch
+                total_frames += int(feat_lens.sum().item())
+                feats = feats.to(device)
+                feat_lens = feat_lens.to(device)
+                tokens = tokens.to(device)
+                token_lens = token_lens.to(device)
 
-            if step % 10 == 0:
-                print(f"epoch {epoch} step {step} loss {loss.item():.4f}")
+                logits, out_lens = model(feats, feat_lens, tokens)
+                # logits: (B, T, U, V)
+                if rnnt_loss is not None:
+                    log_probs = logits.log_softmax(dim=-1)
+                    loss = rnnt_loss(
+                        log_probs, tokens, out_lens, token_lens, blank=0, clamp=-1, reduction="mean"
+                    )
+                else:
+                    enc_only = logits.max(dim=2).values  # (B, T, V)
+                    logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
+                    targets = []
+                    for b in range(tokens.shape[0]):
+                        toks = tokens[b, 1 : token_lens[b]]
+                        targets.append(toks)
+                    flat = torch.cat(targets)
+                    tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
+                    loss = ctc_loss(logp, flat, out_lens, tgt_lens)
 
-        if device.type == "mps":
-            torch.mps.synchronize()
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+
+                if step % 10 == 0:
+                    print(f"epoch {epoch} step {step} loss {loss.item():.4f}")
+
+            if device.type == "mps":
+                torch.mps.synchronize()
+
+    elapsed = time.time() - start
+    if elapsed > 0:
+        print(f"encoder throughput ~ {total_frames/elapsed:.1f} frames/sec (dummy)")
 
 
 if __name__ == "__main__":

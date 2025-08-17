@@ -93,3 +93,16 @@ This project is divided into four distinct phases, moving from a basic functiona
 
 Notes:
 - This baseline is correctness-first and intended for profiling. Performance optimizations (fused Metal kernels) will be implemented in later phases.
+
+### Phase 2: Architectural Redesign to MCT (in progress)
+- [x] Implement MCT modules
+  - [x] Frontend CNN (`modules/mct/frontend_cnn.py`)
+  - [x] Mamba encoder (`modules/mct/encoder_mamba.py`)
+  - [x] RNNT predictor (`modules/mct/predictor.py`)
+  - [x] RNNT joiner (`modules/mct/joiner.py`)
+  - [x] MCTModel (`modules/mct/mct_model.py`)
+- [x] RNNT training script with fallbacks: `train_RNNT.py`
+- [x] RNNT Apple Silicon hparams: `hparams/RNNT/mct_baseline.yaml`
+- [x] Sanity RNNT pass on MPS (CPU fallback for loss)
+- [ ] Benchmark MCT vs CTC baselines; record throughput/memory on MPS
+- [ ] Prepare profiling trace and identify selective_scan hotspots (per README guidance)
