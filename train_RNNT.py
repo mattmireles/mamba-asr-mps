@@ -957,7 +957,7 @@ def main():
                 optimizer.step()
 
                 if step % 10 == 0:
-                    log_msg = f"epoch {epoch} step {step} loss {loss.item():.4f}"
+                    log_msg = f"epoch {epoch} step {step} loss {loss.item():.4f} align(T'U')={align_size} (T'={t_cap}, U={u_cap})"
                     # Rough WER via encoder-only greedy if texts available (approximate)
                     if texts is not None:
                         # Greedy RNN-T decode (approximate, small batch)
