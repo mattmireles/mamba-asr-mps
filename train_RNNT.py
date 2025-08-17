@@ -15,6 +15,7 @@ import time
 import contextlib
 
 from modules.mct.mct_model import MCTModel, MCTConfig
+from datasets.librispeech_csv import LibriSpeechCSVDataset, collate_fn as ls_collate
 
 
 def get_device() -> torch.device:
@@ -105,6 +106,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--sanity", action="store_true")
+    parser.add_argument("--manifest", type=str, default="", help="Path to LibriSpeech CSV manifest for RNNT training")
     args = parser.parse_args()
 
     device = get_device()
@@ -113,8 +115,18 @@ def main():
     cfg = MCTConfig()
     model = MCTModel(cfg).to(device)
 
-    ds = DummyRNNTDataset(num=8 if args.sanity else 64)
-    dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
+    if args.manifest:
+        try:
+            ds = LibriSpeechCSVDataset(args.manifest)
+            dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=ls_collate)
+            print(f"Loaded LibriSpeech CSV: {args.manifest} ({len(ds)} rows)")
+        except Exception as e:
+            print(f"Failed to load manifest: {e}. Falling back to dummy dataset.")
+            ds = DummyRNNTDataset(num=8 if args.sanity else 64)
+            dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
+    else:
+        ds = DummyRNNTDataset(num=8 if args.sanity else 64)
+        dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
 
     # Try to import rnnt loss
     rnnt_loss = None

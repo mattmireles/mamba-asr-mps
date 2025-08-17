@@ -110,4 +110,5 @@ Notes:
   - RNNT(enc-ctc) ~ 409 frames/s (bs=1, T=600, U=30)
 - [x] Prepare profiling trace and identify selective_scan hotspots (via record_function + optional profiler)
 - [ ] Integrate real RNNT loss (torchaudio prototype or warp-transducer) for standard T,U
-- [ ] LibriSpeech-backed RNNT training (using CSVs); record initial WER
+- [x] LibriSpeech-backed RNNT data pipeline using CSV manifests (tokenizer + dataset + collate)
+- [ ] Run LibriSpeech RNNT sanity training and record initial WER
