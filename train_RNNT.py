@@ -743,6 +743,7 @@ def main():
     parser.add_argument("--max_steps", type=int, default=0, help="Limit number of optimizer steps for a short pass (0 = full epoch)")
     parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
     parser.add_argument("--device", type=str, default="auto", choices=["auto","cpu","mps","cuda"], help="Force device override for RNNT experiments")
+    parser.add_argument("--rnnt_cpu_grad", action="store_true", help="Force CPU per-sample RNNT with gradient mapping (bypass on-device RNNT)")
     args = parser.parse_args()
 
     device = get_device() if args.device == "auto" else torch.device(args.device)
@@ -828,7 +829,7 @@ def main():
                 else:
                     rnnt_use_naive = (rnnt_backend == "naive") or (rnnt_backend == "none" and (logits.shape[1] <= 64 and logits.shape[2] <= 16))
                 # logits: (B, T, U, V)
-                if (not args.force_naive_rnnt) and (rnnt_loss is not None) and (rnnt_backend in ("torchaudio", "warp_rnnt")):
+                if (not args.force_naive_rnnt) and (rnnt_loss is not None) and (rnnt_backend in ("torchaudio", "warp_rnnt")) and (not args.rnnt_cpu_grad):
                     with record_function("rnnt_loss_compute"):
                         log_probs = logits.log_softmax(dim=-1)
                         try:
