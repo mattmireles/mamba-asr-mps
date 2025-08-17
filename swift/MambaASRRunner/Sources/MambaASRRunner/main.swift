@@ -1,5 +1,6 @@
 import Foundation
 import CoreML
+import Accelerate
 
 func loadMLModel(at path: String) throws -> MLModel {
     let url = URL(fileURLWithPath: path)
@@ -15,8 +16,15 @@ func runOnce(model: MLModel) throws {
     let featureDim = 80
     let dModel = 256
 
-    // audio_chunk: (1, T, F)
+    // audio_chunk: (1, T, F). For now, use simple synthetic ramp per feature.
     let audioChunk = try MLMultiArray(shape: [1, NSNumber(value: chunkLength), NSNumber(value: featureDim)], dataType: .float32)
+    // Fill with a low-amplitude ramp just to exercise the path
+    for t in 0..<chunkLength {
+        for f in 0..<featureDim {
+            let idx = t * featureDim + f
+            audioChunk[idx] = NSNumber(value: Float(t) / Float(chunkLength))
+        }
+    }
     // token_in: (1, 1)
     let tokenIn = try MLMultiArray(shape: [1, 1], dataType: .int32)
     tokenIn[0] = 0
