@@ -136,3 +136,16 @@ Notes:
 - Generate LibriSpeech CSV manifest (example):
 ```
 ```
+
+#### Additional short RNNT runs (latest)
+- Run date: recent sanity re-check on `data/datasets/test_streaming.csv`
+- Command: `--epochs 1 --batch_size 1 --manifest data/datasets/test_streaming.csv --profile --rnnt_impl auto`
+- Backend selection: `auto` → none available; used naive (value only) with encoder-CTC gradient fallback
+- Device: `mps` with `PYTORCH_ENABLE_MPS_FALLBACK=1` (CTC runs on CPU)
+- Observed encoder throughput: ~56–71 frames/sec (single-step variation)
+- Approximate WER: ~1.0 (single step, expected)
+
+#### RNNT backend installation note
+- Attempted to install `warp_rnnt` via `pip install warp_rnnt`; build failed under pip build isolation due to `ModuleNotFoundError: torch` during wheel preparation.
+- Next action: retry with `pip install --no-build-isolation warp_rnnt` (uses existing torch in environment) or rely on `torchaudio.prototype.rnnt` if available.
+- Current behavior remains correct with CPU fallback for CTC on MPS.
