@@ -64,6 +64,11 @@ This project is divided into four distinct phases, moving from a basic functiona
   - [x] Implemented KD short pass in `scripts/optimize.py --technique kd` using encoder-feature MSE
   - [x] Added auto projection layer when teacher/student `d_model` mismatch
   - [x] KD sanity (dev-clean slice): avg_loss ~3.5360; encoder throughput ~1436.5 frames/sec (bs=2)
+- [x] Complete comprehensive AI-first documentation for scripts
+  - [x] Added `scripts/__init__.py` with full module documentation and API exports
+  - [x] Created `scripts/README.md` with complete user guide, examples, and troubleshooting
+  - [x] Updated main README.md with Phase 3 optimization section and usage examples
+  - [x] Documented all optimization techniques (KD, QAT, pruning) with Apple Silicon focus
 - [ ] Implement Quantization-Aware Training (QAT) pipeline
 - [ ] Implement Structured Pruning pipeline
 - [ ] Implement stateful Core ML export logic
@@ -162,8 +167,9 @@ Notes:
 - Device: `mps` (Apple Silicon); MPS fallback enabled
 - Backend selection: `torchaudio` available, but per-batch errors (`input/output length mismatch`)
 - Behavior: Per-batch automatic fallback to CPU RNNT with gradient mapping (`_rnnt_loss_cpu_with_grad`)
-- Throughput: encoder throughput ~962.3 frames/sec (bs=2); ~800.8 frames/sec on 20-step run
-- WER: approx greedy WER logged on CPU-grad runs; remained ~1.000 during this very short pass (expected)
+- Throughput: encoder throughput ~962.3 fps (bs=2); ~800.8 fps on 20-step run; ~831.1 fps on 60-step run
+- Loss trajectory (60-step run): 283.63 → 87.12 → 224.45 → 325.42 → 339.07 → 209.43 → 68.58 (per 10-step snapshots)
+- WER: approx greedy WER remained ~1.000 during these very short passes (expected)
 - Notes:
   - `torchaudio.functional.rnnt_loss` is deprecated; acceptable for now, but will be removed in 2.9
   - All batches succeeded via CPU-per-sample RNNT with gradient injection back to MPS logits
@@ -171,6 +177,6 @@ Notes:
 
 #### Immediate next steps
 - Keep explicit loss/greedy-WER logging when CPU-grad RNNT path is taken (landed)
-- Run a longer dev-clean epoch using the CPU-grad RNNT path to collect loss trajectory and initial WER (in progress)
+- Run a longer dev-clean epoch using the CPU-grad RNNT path to collect loss trajectory and initial WER (in progress; 60-step pass logged above)
 - Tighten alignment-size guards based on observed T'/U distributions from LibriSpeech
 - Profile `selective_scan` hotspots with Instruments; annotate slow spans in code

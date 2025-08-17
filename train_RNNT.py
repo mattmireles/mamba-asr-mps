@@ -873,7 +873,10 @@ def main():
                                 loss = loss_cpu
                                 # Emit periodic logs here since we bypass the standard logger below
                                 if step % 10 == 0:
-                                    log_msg = f"epoch {epoch} step {step} loss {loss.item():.4f} [cpu-rnnt]"
+                                    log_msg = (
+                                        f"epoch {epoch} step {step} loss {loss.item():.4f} [cpu-rnnt] "
+                                        f"align(T'U')={align_size} (T'={t_cap}, U={u_cap})"
+                                    )
                                     if texts is not None:
                                         # Greedy decode for first sample for approximate WER
                                         def greedy_rnnt_decode_single(feat: torch.Tensor, feat_len: torch.Tensor) -> str:
