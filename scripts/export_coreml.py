@@ -289,8 +289,8 @@ def export_to_coreml(
     print("Core ML conversion placeholder complete.")
 
     # 4. Save the model
-    # model.save(output_path)
-    print(f"Core ML model placeholder saved to {output_path}")
+    model.save(output_path)
+    print(f"Core ML model saved to {output_path}")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
