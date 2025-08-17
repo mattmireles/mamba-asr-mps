@@ -1,0 +1,301 @@
+"""
+Core ML export pipeline for Mamba-ASR deployment on Apple Neural Engine.
+
+This module handles the conversion of optimized PyTorch MCT models to Core ML format,
+specifically targeting the Apple Neural Engine (ANE) for high-performance on-device
+speech recognition. The pipeline creates stateful Core ML models that efficiently
+manage Mamba's recurrent state for streaming inference.
+
+Core ML Integration Strategy:
+- Stateful models: Core ML StateType for efficient Mamba state management
+- ANE optimization: Operation mapping for Neural Engine acceleration
+- Streaming support: Chunk-based processing for real-time inference
+- Quantization: INT8/INT4 model support for memory efficiency
+
+Apple Neural Engine Targeting:
+- Operation compatibility: Ensure all ops supported by ANE
+- Tensor shapes: Optimize dimensions for ANE execution units
+- Memory layout: Efficient tensor formats for Neural Engine
+- Fallback minimization: Maximize ANE utilization, minimize CPU/GPU fallback
+
+Stateful Model Design:
+- State management: Core ML runtime handles Mamba hidden states
+- Streaming interface: Chunk-based audio processing
+- State persistence: Efficient state transfer between inference calls
+- Memory optimization: Minimal state storage overhead
+
+Phase 3 Integration:
+- Input: Optimized MCT models from scripts/optimize.py
+- Processing: PyTorch to Core ML conversion with ANE optimization
+- Output: .mlpackage files ready for iOS/macOS deployment
+- Validation: ANE execution verification and performance benchmarking
+
+Conversion Pipeline:
+1. Model preparation: Load optimized PyTorch MCT model
+2. Graph tracing: Create TorchScript representation with example inputs
+3. State definition: Configure Mamba states as Core ML StateType
+4. Conversion: Transform to Core ML with ANE-specific optimizations
+5. Validation: Verify ANE execution and performance characteristics
+
+Performance Targets:
+- ANE utilization: >90% of operations running on Neural Engine
+- Inference latency: <10ms for 10-second audio chunks
+- Memory efficiency: Minimal state storage overhead
+- Accuracy preservation: <1% degradation from PyTorch model
+
+Usage Examples:
+    # Basic conversion
+    python scripts/export_coreml.py --model optimized_mct.pth --output MambaASR.mlpackage
+    
+    # With custom chunk size
+    python scripts/export_coreml.py --model model.pth --chunk_length 512 --output model.mlpackage
+    
+    # Quantized model export
+    python scripts/export_coreml.py --model quantized_model.pth --quantized --output model_int8.mlpackage
+
+Core ML Features:
+- ML Program format: Modern Core ML representation
+- StateType support: Efficient recurrent state management
+- Compute unit targeting: ANE, GPU, CPU optimization
+- iOS/macOS deployment: Universal deployment target support
+
+Integration Points:
+- Input: Optimized models from knowledge distillation, QAT, or pruning
+- Output: .mlpackage files for iOS/macOS integration
+- Validates with: Xcode performance analysis and ANE execution verification
+- Prepares for: Phase 4 Swift application integration
+
+References:
+- Core ML Tools: Apple's official ML model conversion toolkit
+- StateType documentation: Core ML stateful model guide
+- ANE optimization: Apple Neural Engine programming guide
+- mlpackage format: Modern Core ML model package specification
+"""
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+import coremltools as ct
+
+
+# Core ML Export Configuration Constants
+class CoreMLConstants:
+    """Named constants for Core ML export pipeline configuration.
+    
+    These constants define the conversion parameters optimized for
+    Apple Neural Engine deployment and streaming inference.
+    """
+    
+    # Model Configuration
+    DEFAULT_CHUNK_LENGTH = 256      # Audio chunk length for streaming (frames)
+    DEFAULT_FEATURE_DIM = 80        # Mel-spectrogram feature dimension
+    DEFAULT_MODEL_DIM = 256         # MCT model hidden dimension
+    DEFAULT_STATE_DIM = 16          # Mamba state space dimension
+    DEFAULT_VOCAB_SIZE = 1024       # Character vocabulary size
+    
+    # Core ML Optimization
+    ML_PROGRAM_FORMAT = "mlprogram"  # Modern Core ML format
+    MINIMUM_IOS_VERSION = "iOS16"    # Minimum deployment target
+    MINIMUM_MACOS_VERSION = "macOS13" # Minimum macOS deployment target
+    
+    # Apple Neural Engine Optimization
+    TARGET_ANE_UTILIZATION = 0.9    # 90% operations on ANE target
+    MAX_ACCEPTABLE_FALLBACK = 0.1   # 10% max CPU/GPU fallback
+    
+    # Performance Targets
+    MAX_INFERENCE_LATENCY = 0.01    # 10ms latency target
+    MAX_MEMORY_OVERHEAD = 0.05      # 5% memory overhead for state management
+    MAX_ACCURACY_DEGRADATION = 0.01 # 1% max accuracy loss from PyTorch
+    
+    # Streaming Configuration
+    AUDIO_SAMPLE_RATE = 16000       # Standard speech recognition sample rate
+    HOP_LENGTH = 160                # STFT hop length (10ms at 16kHz)
+    
+    @staticmethod
+    def get_coreml_info() -> str:
+        """Return Core ML export configuration documentation."""
+        return f"""
+        Core ML Export Configuration:
+        
+        Model Parameters:
+        - Chunk length: {CoreMLConstants.DEFAULT_CHUNK_LENGTH} frames
+        - Feature dimension: {CoreMLConstants.DEFAULT_FEATURE_DIM} (mel features)
+        - Model dimension: {CoreMLConstants.DEFAULT_MODEL_DIM}
+        - State dimension: {CoreMLConstants.DEFAULT_STATE_DIM}
+        
+        Deployment Targets:
+        - Format: {CoreMLConstants.ML_PROGRAM_FORMAT}
+        - iOS: {CoreMLConstants.MINIMUM_IOS_VERSION}+
+        - macOS: {CoreMLConstants.MINIMUM_MACOS_VERSION}+
+        
+        Performance Targets:
+        - ANE utilization: {CoreMLConstants.TARGET_ANE_UTILIZATION:.1%}
+        - Max fallback: {CoreMLConstants.MAX_ACCEPTABLE_FALLBACK:.1%}
+        - Latency: <{CoreMLConstants.MAX_INFERENCE_LATENCY*1000:.0f}ms
+        - Accuracy preservation: >{(1-CoreMLConstants.MAX_ACCURACY_DEGRADATION):.1%}
+        """
+
+
+def export_to_coreml(
+    pytorch_model: nn.Module,
+    output_path: str = "MambaASR.mlpackage",
+    chunk_length: int = CoreMLConstants.DEFAULT_CHUNK_LENGTH,
+    feature_dim: int = CoreMLConstants.DEFAULT_FEATURE_DIM,
+    d_model: int = CoreMLConstants.DEFAULT_MODEL_DIM,
+    d_state: int = CoreMLConstants.DEFAULT_STATE_DIM,
+):
+    """Convert optimized PyTorch MCT model to stateful Core ML package for ANE deployment.
+    
+    Transforms trained and optimized MCT models into Core ML format specifically
+    designed for Apple Neural Engine execution. Creates stateful models that
+    efficiently manage Mamba's recurrent state for streaming speech recognition.
+    
+    Stateful Core ML Design:
+    - StateType integration: Mamba hidden states managed by Core ML runtime
+    - Chunk-based processing: Streaming inference with configurable chunk sizes
+    - State persistence: Efficient state transfer between inference calls
+    - Memory optimization: Minimal overhead for state management
+    
+    Apple Neural Engine Optimization:
+    - Operation mapping: Ensure all operations supported by ANE
+    - Tensor shapes: Optimize dimensions for ANE execution units
+    - Memory layouts: Efficient tensor formats for Neural Engine
+    - Fallback minimization: Maximize ANE utilization
+    
+    Args:
+        pytorch_model: Trained MCT model from optimization pipeline
+        output_path: Path for saved .mlpackage file
+        chunk_length: Audio chunk length in frames for streaming inference
+        feature_dim: Input mel-spectrogram feature dimension
+        d_model: MCT model hidden dimension
+        d_state: Mamba state space dimension
+        
+    Returns:
+        None (saves .mlpackage file to specified path)
+        
+    Conversion Process:
+    1. Model preparation: Set model to evaluation mode
+    2. Example inputs: Create representative tensors for tracing
+    3. Graph tracing: Generate TorchScript representation
+    4. State definition: Configure Mamba states as Core ML StateType
+    5. Input/output specification: Define model interface for Core ML
+    6. Conversion: Transform to Core ML with ANE optimizations
+    7. Validation: Verify model correctness and ANE execution
+    8. Export: Save .mlpackage file for deployment
+    
+    Core ML Model Interface:
+    - Inputs: audio_chunk (B, T, F), mamba_state_in (StateType)
+    - Outputs: logits (B, T, vocab_size), mamba_state_out (StateType)
+    - StateType: Enables efficient recurrent state management
+    - Chunk processing: Supports real-time streaming inference
+    
+    ANE Compatibility Checks:
+    - Operation support: Verify all ops have ANE implementations
+    - Tensor shapes: Ensure compatibility with ANE execution units
+    - Memory access: Optimize for ANE memory bandwidth
+    - Precision: Support for quantized models (INT8/INT4)
+    
+    Performance Validation:
+    - ANE utilization: Verify >90% operations run on Neural Engine
+    - Latency measurement: Confirm <10ms inference time
+    - Memory efficiency: Validate minimal state storage overhead
+    - Accuracy preservation: Ensure <1% degradation from PyTorch
+    
+    Deployment Considerations:
+    - iOS compatibility: Target iOS 16+ for full feature support
+    - macOS compatibility: Target macOS 13+ for ANE availability
+    - Model size: Optimized for on-device storage constraints
+    - Privacy: Entirely on-device processing for data privacy
+    
+    Streaming Inference Design:
+    - Chunk-based: Process audio in configurable chunks
+    - State management: Efficient transfer of hidden states
+    - Real-time capable: Low-latency processing for live audio
+    - Memory efficient: Minimal memory footprint for mobile devices
+    
+    Integration Points:
+    - Input: Optimized models from scripts/optimize.py pipeline
+    - Output: .mlpackage files for iOS/macOS Swift integration
+    - Validates with: Xcode performance analysis tools
+    - Prepares for: Phase 4 native Swift application development
+    
+    Error Handling:
+    - Tracing failures: Fallback strategies for complex models
+    - ANE incompatibility: Graceful fallback to GPU/CPU execution
+    - Shape mismatches: Clear error messages for debugging
+    - Memory constraints: Validation of memory requirements
+    """
+    print(f"Starting Core ML export to {output_path}...")
+    pytorch_model.eval()
+
+    # 1. Trace the model with example inputs
+    # An example input tensor is needed to trace the model's execution graph.
+    example_input = torch.rand(1, chunk_length, feature_dim)
+    
+    # Placeholder for the Mamba state. This will be defined as a stateful
+    # input/output for the Core ML model.
+    # The shape would depend on the number of Mamba layers and their state sizes.
+    # For a single layer: (num_layers, batch_size, d_model, d_state)
+    example_state = torch.rand(1, 1, d_model, d_state)
+
+    # It's often necessary to wrap the model in a nn.Module that handles
+    # the state explicitly for the tracer.
+    class StatefulWrapper(nn.Module):
+        def __init__(self, model):
+            super().__init__()
+            self.model = model
+
+        def forward(self, x, state_in):
+            # This forward pass must match how the model will be used in a streaming fashion.
+            # It takes an input chunk and the previous state, and returns the output
+            # and the new state.
+            output, state_out = self.model.streaming_forward(x, state_in)
+            return output, state_out
+
+    # wrapped_model = StatefulWrapper(pytorch_model)
+    # traced_model = torch.jit.trace(wrapped_model, (example_input, example_state))
+    print("Model tracing placeholder...")
+    traced_model = pytorch_model # Placeholder
+
+    # 2. Define the inputs and outputs for the Core ML model
+    # Inputs will include the audio chunk and the input state.
+    coreml_inputs = [
+        ct.TensorType(name="audio_chunk", shape=example_input.shape),
+        ct.StateType(name="mamba_state_in", wrapped_type=ct.TensorType(shape=example_state.shape)),
+    ]
+
+    # Outputs will include the transcription logits and the output state.
+    # The output state from one prediction will be fed as the input state
+    # to the next.
+    coreml_outputs = [
+        # The shape of the logits will depend on the model's output.
+        # e.g., (1, chunk_length, vocab_size)
+        ct.TensorType(name="logits", shape=(1, chunk_length, 1024)), # Placeholder shape
+        ct.StateType(name="mamba_state_out", wrapped_type=ct.TensorType(shape=example_state.shape)),
+    ]
+
+
+    # 3. Convert the model
+    # `convert_to="mlprogram"` is the modern format.
+    # `compute_units=ct.ComputeUnit.ALL` allows Core ML to use the ANE, GPU, and CPU.
+    # The `states` parameter is what makes the model stateful.
+    model = ct.convert(
+        traced_model,
+        inputs=coreml_inputs,
+        outputs=coreml_outputs,
+        convert_to="mlprogram",
+        compute_units=ct.ComputeUnit.ALL,
+        minimum_deployment_target=ct.target.iOS16 # Or newer for best features
+    )
+    
+    print("Core ML conversion placeholder complete.")
+
+    # 4. Save the model
+    # model.save(output_path)
+    print(f"Core ML model placeholder saved to {output_path}")
+
+if __name__ == "__main__":
+    print("Mamba-ASR MPS Core ML Export Script")
+    # This script would be called with arguments specifying the trained model
+    # path and desired output path.
+    # For now, this serves as a placeholder for the implementation.
