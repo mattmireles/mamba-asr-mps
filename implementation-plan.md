@@ -78,6 +78,9 @@ This project is divided into four distinct phases, moving from a basic functiona
   - [x] Uses `prune.ln_structured(..., dim=0)`; prunes Conv/Linear
   - [ ] Add per-layer sparsity targets and checkpointing
 - [ ] Implement stateful Core ML export logic
+- [x] Add export CLI and guarded `coremltools` import in `scripts/export_coreml.py`
+- [ ] Implement stateful wrapper and trace (`streaming_forward` → StateType)
+- [ ] Convert to `.mlpackage`; verify model interface (inputs: audio_chunk, mamba_state_in; outputs: logits, mamba_state_out)
 - [ ] Validate converted model on device and verify ANE execution
 
 ### Phase 4: Building the Native Swift Inference Pipeline
@@ -88,6 +91,10 @@ This project is divided into four distinct phases, moving from a basic functiona
 1.  **Write the vDSP Preprocessing Pipeline**: Write a new Swift module to handle all audio preprocessing (e.g., Mel spectrogram calculation) using the **Accelerate framework's vDSP library**, ensuring this CPU-bound task is maximally efficient.
 2.  **Write the AMX-Accelerated Decoder**: Write a new Swift implementation of the beam search decoding algorithm. Its core matrix operations will be written using the **Accelerate framework (BNNS/BLAS)** to offload the work to the **Apple Matrix Coprocessor (AMX)**.
 3.  **Profile and Finalize**: Outline the final profiling process using Xcode Instruments to analyze the full pipeline—from audio input to text output—to identify and eliminate any remaining bottlenecks and achieve the target real-time performance.
+
+Notes:
+- The RNNT baseline is training end-to-end (CPU-grad path). Longer runs will be executed to establish a stable baseline WER prior to QAT/pruning export.
+- Export pipeline bootstrapped; next, wire `streaming_forward` state into StateType and verify in Core ML Tools.
 
 **Exit Criteria**: A functional Swift application demonstrating real-time, end-to-end ASR performance, with documented profiling results.
 
