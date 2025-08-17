@@ -116,7 +116,7 @@ Notes:
 #### RNNT sanity results (current)
 - Backend: `--rnnt_impl naive` (CTC grad fallback); MPS enabled with CPU fallbacks
 - Encoder throughput: ~132.2 frames/sec (dummy, bs=1)
-- Note: With `torchaudio`/`warp_rnnt` installed, loss will run natively (with automatic CPU fallback on MPS if required)
+- Note: With `torchaudio`/`warp_rnn` installed, loss will run natively (with automatic CPU fallback on MPS if required)
 
 - Backend: `--rnnt_impl ctc` (encoder-CTC fallback), bs=2, sanity
 - Encoder throughput: ~312.3 frames/sec (dummy)
@@ -128,10 +128,11 @@ Notes:
 
 #### Final Phase 2 Benchmark (test_streaming dataset)
 - **Command**: `PYTHONPATH=".../Mamba-ASR-MPS" PYTORCH_ENABLE_MPS_FALLBACK=1 python Mamba-ASR-MPS/train_RNNT.py --epochs 1 --batch_size 1 --manifest data/datasets/test_streaming.csv --profile`
-- **Throughput**: ~41.5 frames/sec
+- **Throughput**: ~57.2 frames/sec
 - **Approximate WER**: 1.0 (as expected for a single training step)
 - **Status**: Phase 2 is complete. The MCT architecture is implemented and benchmarked.
 
 #### How to run (Phase 2)
 - Generate LibriSpeech CSV manifest (example):
+```
 ```

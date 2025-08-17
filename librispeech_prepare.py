@@ -84,6 +84,24 @@ class LSRow:
 def scan_directory_for_wavs_text(data_dir: Path) -> List[LSRow]:
     rows: List[LSRow] = []
     
+    # Try to find a manifest CSV in the directory
+    manifest_csv = None
+    if (data_dir / "train.csv").exists():
+        manifest_csv = data_dir / "train.csv"
+    elif (data_dir / "validation.csv").exists():
+        manifest_csv = data_dir / "validation.csv"
+    
+    transcriptions = {}
+    if manifest_csv:
+        with manifest_csv.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Assuming the CSV has 'audio_path' and 'text' columns
+                # and that the audio_path is a relative path from the manifest
+                audio_filename = Path(row.get("audio_path", "")).name
+                if audio_filename:
+                    transcriptions[audio_filename] = row.get("text", "")
+
     # Scan for common audio file types
     audio_extensions = ["*.flac", "*.wav", "*.mp3", "*.m4a"]
     audio_files = []
@@ -97,14 +115,16 @@ def scan_directory_for_wavs_text(data_dir: Path) -> List[LSRow]:
         except Exception:
             dur = 0.0
         
-        # Check for transcription file with .txt extension
-        txt_path = wav_path.with_suffix(".txt")
-        text = ""
-        if txt_path.exists():
-            try:
-                text = txt_path.read_text(encoding="utf-8").strip()
-            except Exception:
-                text = ""
+        # Get transcription from manifest if available, otherwise look for .txt
+        text = transcriptions.get(wav_path.name, "")
+        if not text:
+            txt_path = wav_path.with_suffix(".txt")
+            if txt_path.exists():
+                try:
+                    text = txt_path.read_text(encoding="utf-8").strip()
+                except Exception:
+                    text = ""
+        
         rows.append(LSRow(str(wav_path), dur, text))
     return rows
 
