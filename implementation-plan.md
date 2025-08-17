@@ -122,6 +122,9 @@ Notes:
 - Encoder throughput: ~132.2 frames/sec (dummy, bs=1)
 - Note: With `torchaudio`/`warp_rnnt` installed, loss will run natively (with automatic CPU fallback on MPS if required)
 
+- Backend: `--rnnt_impl ctc` (encoder-CTC fallback), bs=2, sanity
+- Encoder throughput: ~312.3 frames/sec (dummy)
+
 #### How to run (Phase 2)
 - Generate LibriSpeech CSV manifest (example):
 ```bash
