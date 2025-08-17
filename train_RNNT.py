@@ -411,6 +411,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--sanity", action="store_true")
     parser.add_argument("--manifest", type=str, default="", help="Path to LibriSpeech CSV manifest for RNNT training")
+    parser.add_argument("--force_naive_rnnt", action="store_true", help="Force small T',U for naive RNNT loss path")
     args = parser.parse_args()
 
     device = get_device()
@@ -473,8 +474,16 @@ def main():
                 token_lens = token_lens.to(device)
 
                 logits, out_lens = model(feats, feat_lens, tokens)
+                # Optionally clamp lengths to force naive RNNT path (for environments without RNNT loss)
+                if args.force_naive_rnnt:
+                    # Clamp T' and U to small sizes
+                    Tprime = min(logits.shape[1], 64)
+                    U = min(logits.shape[2], 16)
+                    logits = logits[:, :Tprime, :U, :]
+                    out_lens = torch.clamp(out_lens, max=Tprime)
+                    token_lens = torch.clamp(token_lens, max=U)
                 # logits: (B, T, U, V)
-                if rnnt_loss is not None:
+                if (not args.force_naive_rnnt) and (rnnt_loss is not None):
                     log_probs = logits.log_softmax(dim=-1)
                     loss = rnnt_loss(
                         log_probs, tokens, out_lens, token_lens, blank=0, clamp=-1, reduction="mean"
@@ -503,25 +512,43 @@ def main():
                     log_msg = f"epoch {epoch} step {step} loss {loss.item():.4f}"
                     # Rough WER via encoder-only greedy if texts available (approximate)
                     if texts is not None:
-                        with torch.no_grad():
-                            enc_only = logits.max(dim=2).values  # (B, T, V)
-                            pred_ids = enc_only.argmax(dim=-1).tolist()
-                            def collapse(ids):
-                                out = []
-                                prev = None
-                                for i in ids:
-                                    if i == 0:
-                                        prev = i
-                                        continue
-                                    if prev is None or i != prev:
-                                        out.append(i)
-                                    prev = i
-                                return out
-                            hyps = [tokenizer.decode(collapse(seq)) for seq in pred_ids]
-                            refs = [tokenizer.normalize(t) for t in texts]
-                            wers = [wer(r, h) for r, h in zip(refs, hyps)]
-                            avg_wer = sum(wers) / max(1, len(wers))
-                            log_msg += f" wer~{avg_wer:.3f}"
+                        # Greedy RNN-T decode (approximate, small batch)
+                        def greedy_rnnt_decode_single(feat: torch.Tensor, feat_len: torch.Tensor) -> str:
+                            # feat: (T, 80)
+                            model.eval()
+                            with torch.no_grad():
+                                feat_b = feat.unsqueeze(0).to(device)
+                                len_b = feat_len.unsqueeze(0).to(device)
+                                enc_in = model.frontend(feat_b)               # (1, T', D)
+                                enc_out = model.encoder(enc_in)                # (1, T', D)
+                                Tprime = int(enc_out.shape[1])
+                                # Predictor streaming state
+                                hidden = None
+                                token_cur = torch.zeros(1, dtype=torch.long, device=device)  # blank start
+                                hyp_ids = []
+                                max_total = 128
+                                total = 0
+                                for t in range(Tprime):
+                                    u = 0
+                                    while u < 32 and total < max_total:
+                                        pred_step, hidden = model.predictor.forward_streaming(token_cur.unsqueeze(1), hidden)
+                                        # Join for this (t,u)
+                                        logits_tu = model.joiner(enc_out[:, t:t+1, :], pred_step)  # (1,1,1,V)
+                                        next_id = int(logits_tu[0, 0, 0].argmax().item())
+                                        total += 1
+                                        if next_id == RNNTTrainingConstants.RNNT_BLANK_TOKEN:
+                                            break
+                                        else:
+                                            hyp_ids.append(next_id)
+                                            token_cur = torch.tensor([next_id], dtype=torch.long, device=device)
+                                            u += 1
+                                hyp = tokenizer.decode(hyp_ids)
+                            model.train()
+                            return hyp
+                        # Compute WER for first sample only (speed)
+                        hyp_text = greedy_rnnt_decode_single(feats[0].cpu(), feat_lens[0].cpu())
+                        ref_text = tokenizer.normalize(texts[0])
+                        log_msg += f" wer~{wer(ref_text, hyp_text):.3f}"
                     print(log_msg)
 
             if device.type == "mps":

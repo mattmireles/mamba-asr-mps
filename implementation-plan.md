@@ -111,4 +111,5 @@ Notes:
 - [x] Prepare profiling trace and identify selective_scan hotspots (via record_function + optional profiler)
 - [ ] Integrate real RNNT loss (torchaudio prototype or warp-transducer) for standard T,U
 - [x] LibriSpeech-backed RNNT data pipeline using CSV manifests (tokenizer + dataset + collate)
-- [ ] Run LibriSpeech RNNT sanity training and record initial WER
+- [x] Run LibriSpeech RNNT sanity training and record initial WER (approx greedy)
+- [x] Provide naive RNNT loss path (`--force_naive_rnnt`) for environments without RNNT loss
