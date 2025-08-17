@@ -69,8 +69,14 @@ This project is divided into four distinct phases, moving from a basic functiona
   - [x] Created `scripts/README.md` with complete user guide, examples, and troubleshooting
   - [x] Updated main README.md with Phase 3 optimization section and usage examples
   - [x] Documented all optimization techniques (KD, QAT, pruning) with Apple Silicon focus
-- [ ] Implement Quantization-Aware Training (QAT) pipeline
-- [ ] Implement Structured Pruning pipeline
+- [x] Implement Quantization-Aware Training (QAT) pipeline (short pass)
+  - [x] `scripts/optimize.py --technique qat` runs fake-quant QAT short pass (50 steps)
+  - [x] Uses QuantStub/DeQuantStub wrapper and prepare_qat/convert
+  - [ ] Migrate to torchao PT2E APIs (PyTorch deprecations)
+- [x] Implement Structured Pruning pipeline (short pass)
+  - [x] `scripts/optimize.py --technique prune` runs 1 iteration of global structured pruning + finetune (50 steps)
+  - [x] Uses `prune.ln_structured(..., dim=0)`; prunes Conv/Linear
+  - [ ] Add per-layer sparsity targets and checkpointing
 - [ ] Implement stateful Core ML export logic
 - [ ] Validate converted model on device and verify ANE execution
 
@@ -177,7 +183,8 @@ Notes:
 
 ##### Quick post-train evaluation (greedy decode)
 - Trainer now supports `--eval_after --eval_samples N` for a small greedy-decode WER estimate
-- Example (64 samples, 20 steps, CPU-grad): `post-train eval: avg WER over 12 samples = 1.000`
+- Example A (64 samples, 20 steps, CPU-grad): `post-train eval: avg WER over 12 samples = 1.000`
+- Example B (256 samples, 120 steps, CPU-grad): `post-train eval: avg WER over 24 samples = 1.000`; throughput ~878.4 fps
 - Expected: WER near 1.0 at this stage; serves only as a smoke test
 - Notes:
   - `torchaudio.functional.rnnt_loss` is deprecated; acceptable for now, but will be removed in 2.9
