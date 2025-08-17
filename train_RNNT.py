@@ -612,6 +612,121 @@ def select_rnnt_backend(preferred: str = "auto"):
         return res
     return None, "none"
 
+
+def _rnnt_loss_torchaudio_safe(
+    rnnt_fn,
+    log_probs: torch.Tensor,
+    tokens_with_blank: torch.Tensor,
+    out_lens: torch.Tensor,
+    token_lens_with_blank: torch.Tensor,
+    blank: int = 0,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """Compute RNNT loss with torchaudio per-sample to avoid batch length mismatches.
+
+    - Removes leading blank from targets per-sample
+    - Slices log_probs per-sample to (Ti, Ui+1, V)
+    - Runs on CPU to avoid MPS op gaps
+    """
+    try:
+        from torchaudio.functional import rnnt_loss as _ta_fn  # type: ignore
+        is_ta_functional = rnnt_fn is _ta_fn
+    except Exception:
+        is_ta_functional = False
+
+    B, Tcap, Ucap, V = log_probs.shape
+    losses = []
+    for b in range(B):
+        Ti = int(out_lens[b].item())
+        Ui_with_blank = int(token_lens_with_blank[b].item())
+        Ui = max(0, Ui_with_blank - 1)
+        if Ti <= 0 or Ui <= 0:
+            continue
+        # Effective usable lengths constrained by current tensor caps
+        Ti_eff = min(Ti, Tcap)
+        Ui_eff = min(Ui, max(0, Ucap - 1))
+        if Ui_eff <= 0 or Ti_eff <= 0:
+            continue
+        # Slice per-sample
+        lp_b = log_probs[b : b + 1, : Ti_eff, : (Ui_eff + 1), :].contiguous()
+        # Targets exclude leading blank and align to Ui_eff
+        tgt_b = tokens_with_blank[b, 1 : 1 + Ui_eff]
+        if is_ta_functional:
+            tgt_b = tgt_b.to(torch.int32).unsqueeze(0)  # (1, Ui)
+            Ti_t = torch.tensor([Ti_eff], dtype=torch.int32)
+            Ui_t = torch.tensor([Ui_eff], dtype=torch.int32)
+        else:
+            tgt_b = tgt_b.unsqueeze(0)  # (1, Ui)
+            Ti_t = torch.tensor([Ti_eff], dtype=torch.long)
+            Ui_t = torch.tensor([Ui_eff], dtype=torch.long)
+        # Move to CPU as torchaudio op is CPU-backed here
+        loss_b = rnnt_fn(
+            lp_b.to("cpu"),
+            tgt_b.to("cpu"),
+            Ti_t.to("cpu"),
+            Ui_t.to("cpu"),
+            blank=blank,
+            clamp=-1,
+            reduction="mean",
+        )
+        losses.append(loss_b.to(log_probs.device))
+    if not losses:
+        return torch.zeros((), device=log_probs.device)
+    return torch.stack(losses).mean() if reduction == "mean" else torch.stack(losses).sum()
+
+
+def _rnnt_loss_cpu_with_grad(
+    rnnt_fn,
+    logits: torch.Tensor,
+    tokens_with_blank: torch.Tensor,
+    out_lens: torch.Tensor,
+    token_lens_with_blank: torch.Tensor,
+    blank: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute RNNT loss on CPU per-sample and return (loss_value_on_device, grad_logits_on_device).
+
+    This keeps the model on MPS, computes a scalar loss on CPU while preserving gradients
+    w.r.t. logits via manual backward on a CPU copy, then maps grad back to device.
+    """
+    try:
+        from torchaudio.functional import rnnt_loss as _ta_fn  # type: ignore
+        is_ta_functional = rnnt_fn is _ta_fn
+    except Exception:
+        is_ta_functional = False
+    B, Tcap, Ucap, V = logits.shape
+    logits_cpu = logits.detach().to("cpu").requires_grad_(True)
+    total = None
+    used = 0
+    for b in range(B):
+        Ti = int(out_lens[b].item())
+        Ui_with_blank = int(token_lens_with_blank[b].item())
+        Ui = max(0, Ui_with_blank - 1)
+        Ti_eff = min(Ti, Tcap)
+        Ui_eff = min(Ui, max(0, Ucap - 1))
+        if Ti_eff <= 0 or Ui_eff <= 0:
+            continue
+        # Slice logits and compute log_probs in place to keep autograd path
+        sl = logits_cpu[b : b + 1, : Ti_eff, : (Ui_eff + 1), :].contiguous()
+        lp_b = sl.log_softmax(dim=-1)
+        tgt_b = tokens_with_blank[b, 1 : 1 + Ui_eff]
+        if is_ta_functional:
+            tgt_b = tgt_b.to(torch.int32).unsqueeze(0)
+            Ti_t = torch.tensor([Ti_eff], dtype=torch.int32)
+            Ui_t = torch.tensor([Ui_eff], dtype=torch.int32)
+        else:
+            tgt_b = tgt_b.unsqueeze(0)
+            Ti_t = torch.tensor([Ti_eff], dtype=torch.long)
+            Ui_t = torch.tensor([Ui_eff], dtype=torch.long)
+        loss_b = rnnt_fn(lp_b, tgt_b, Ti_t, Ui_t, blank=blank, clamp=-1, reduction="mean")
+        total = loss_b if total is None else total + loss_b
+        used += 1
+    if used == 0:
+        return torch.zeros((), device=logits.device), torch.zeros_like(logits)
+    total = total / used
+    total.backward()
+    grad_logits = logits_cpu.grad.to(logits.device)
+    return total.to(logits.device).detach(), grad_logits.detach()
+
 def main():
     import argparse
 
@@ -627,9 +742,10 @@ def main():
     parser.add_argument("--max_samples", type=int, default=0, help="Limit number of samples from manifest for a short pass (0 = all)")
     parser.add_argument("--max_steps", type=int, default=0, help="Limit number of optimizer steps for a short pass (0 = full epoch)")
     parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
+    parser.add_argument("--device", type=str, default="auto", choices=["auto","cpu","mps","cuda"], help="Force device override for RNNT experiments")
     args = parser.parse_args()
 
-    device = get_device()
+    device = get_device() if args.device == "auto" else torch.device(args.device)
     print(f"Using device: {device}")
 
     # Tokenizer and vocab
@@ -746,17 +862,56 @@ def main():
                                 log_probs, t_tokens, t_out_lens, t_tok_lens, blank=0, clamp=-1, reduction="mean"
                             )
                         except Exception as e:
-                            # Safe CPU fallback for loss only; if that fails, fall back to CTC
-                            print(f"RNN-T backend failed on-device ({e}); retrying loss on CPU.")
+                            # Safe CPU fallback with gradients via manual backward on CPU logits
+                            print(f"RNN-T backend failed on-device ({e}); computing RNNT on CPU per-sample with grad mapping.")
                             try:
-                                lp_cpu = log_probs.detach().to("cpu")
-                                # CPU path: also remove leading blank for torchaudio.functional
-                                tok_cpu = tokens[:, 1:].detach().to(torch.int32).to("cpu")
-                                ol_cpu = out_lens.detach().to(torch.int32).to("cpu")
-                                tl_cpu = (token_lens - 1).clamp_min(0).detach().to(torch.int32).to("cpu")
-                                loss = rnnt_loss(lp_cpu, tok_cpu, ol_cpu, tl_cpu, blank=0, clamp=-1, reduction="mean").to(log_probs.device)
+                                loss_cpu, grad_logits = _rnnt_loss_cpu_with_grad(rnnt_loss, logits.detach(), tokens, out_lens, token_lens, blank=0)
+                                # Replace autograd path with manual gradient injection
+                                optimizer.zero_grad(set_to_none=True)
+                                logits.backward(grad_logits)
+                                optimizer.step()
+                                loss = loss_cpu
+                                # Emit periodic logs here since we bypass the standard logger below
+                                if step % 10 == 0:
+                                    log_msg = f"epoch {epoch} step {step} loss {loss.item():.4f} [cpu-rnnt]"
+                                    if texts is not None:
+                                        # Greedy decode for first sample for approximate WER
+                                        def greedy_rnnt_decode_single(feat: torch.Tensor, feat_len: torch.Tensor) -> str:
+                                            model.eval()
+                                            with torch.no_grad():
+                                                feat_b = feat.unsqueeze(0).to(device)
+                                                len_b = feat_len.unsqueeze(0).to(device)
+                                                enc_in = model.frontend(feat_b)
+                                                enc_out = model.encoder(enc_in)
+                                                Tprime = int(enc_out.shape[1])
+                                                hidden = None
+                                                token_cur = torch.zeros(1, dtype=torch.long, device=device)
+                                                hyp_ids = []
+                                                max_total = 128
+                                                total_dec = 0
+                                                for t in range(Tprime):
+                                                    u = 0
+                                                    while u < 32 and total_dec < max_total:
+                                                        pred_step, hidden = model.predictor.forward_streaming(token_cur.unsqueeze(1), hidden)
+                                                        logits_tu = model.joiner(enc_out[:, t:t+1, :], pred_step)
+                                                        next_id = int(logits_tu[0, 0, 0].argmax().item())
+                                                        total_dec += 1
+                                                        if next_id == RNNTTrainingConstants.RNNT_BLANK_TOKEN:
+                                                            break
+                                                        hyp_ids.append(next_id)
+                                                        token_cur = torch.tensor([next_id], dtype=torch.long, device=device)
+                                                        u += 1
+                                                hyp = tokenizer.decode(hyp_ids)
+                                            model.train()
+                                            return hyp
+                                        hyp_text = greedy_rnnt_decode_single(feats[0].cpu(), feat_lens[0].cpu())
+                                        ref_text = tokenizer.normalize(texts[0])
+                                        log_msg += f" wer~{wer(ref_text, hyp_text):.3f}"
+                                    print(log_msg)
+                                # Skip standard backward/step and logger below since we've already done them
+                                continue
                             except Exception as e2:
-                                print(f"CPU RNN-T loss failed ({e2}); using encoder-CTC fallback for this batch.")
+                                print(f"CPU RNNT w/grad failed ({e2}); using encoder-CTC fallback for this batch.")
                                 with record_function("ctc_fallback_compute"):
                                     enc_only = logits.max(dim=2).values  # (B, T, V)
                                     logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
