@@ -325,6 +325,48 @@ class MCTModel(nn.Module):
         output_lengths = torch.clamp(feat_lens // subsampling_factor, min=1)
         return acoustic_encoded, output_lengths
     
+    def streaming_forward(
+        self,
+        feats_chunk: torch.Tensor,
+        token_in: torch.Tensor,
+        predictor_hidden: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Stateful streaming forward suitable for Core ML export.
+        
+        Processes an input audio chunk and a single current token to produce
+        per-frame logits for the next-symbol distribution along with the updated
+        predictor hidden state. This mirrors step-wise RNN-T decoding while
+        batching over the time dimension for the provided chunk.
+        
+        Args:
+            feats_chunk: Input acoustic features for a streaming chunk (B, T, F)
+            token_in: Current token ids for predictor step (B, 1)
+            predictor_hidden: Optional GRU hidden state from previous call
+        
+        Returns:
+            logits_time: Logits per time step for the provided token (B, T/4, 1, V)
+            new_hidden: Updated predictor hidden state to carry across chunks
+        """
+        # Frontend + encoder over the chunk
+        acoustic_features = self.frontend(feats_chunk)           # (B, T', D)
+        acoustic_encoded = self.encoder(acoustic_features)       # (B, T', D)
+        B, Tprime, D = acoustic_encoded.shape
+        V = self.cfg.vocab_size
+
+        # Run predictor once for the provided token (streaming)
+        pred_step, new_hidden = self.predictor.forward_streaming(token_in, predictor_hidden)  # (B,1,D), hidden
+
+        # Join across time steps against a fixed predictor step
+        # Build logits tensor (B, T', 1, V)
+        logits_list: list[torch.Tensor] = []
+        for t in range(Tprime):
+            enc_t = acoustic_encoded[:, t:t+1, :]                 # (B,1,D)
+            logits_t = self.joiner(enc_t, pred_step)              # (B,1,1,V)
+            logits_list.append(logits_t)
+        logits_time = torch.cat(logits_list, dim=1)               # (B,T',1,V)
+
+        return logits_time, new_hidden
+    
     def get_model_info(self) -> str:
         """Return comprehensive model information for debugging and analysis."""
         total_params = sum(p.numel() for p in self.parameters())
