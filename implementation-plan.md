@@ -175,8 +175,14 @@ Notes:
   - All batches succeeded via CPU-per-sample RNNT with gradient injection back to MPS logits
   - Confirms "real RNN-T loss" path is working end-to-end for training on Apple Silicon
 
+##### Alignment observations (from logs)
+- Example caps seen: T'≈211–260, U≈140–165 → T'·U≈29.5k–42.9k per batch max
+- Current guard: `--max_align=250000` is generous; safe for naive path but not needed in our current runs
+- Action: keep guard at 250k; instrumented logs now include `align(T'U')` for ongoing tuning
+
 #### Immediate next steps
 - Keep explicit loss/greedy-WER logging when CPU-grad RNNT path is taken (landed)
 - Run a longer dev-clean epoch using the CPU-grad RNNT path to collect loss trajectory and initial WER (in progress; 60-step pass logged above)
 - Tighten alignment-size guards based on observed T'/U distributions from LibriSpeech
 - Profile `selective_scan` hotspots with Instruments; annotate slow spans in code
+- Evaluate migration from deprecated `torchaudio.functional.rnnt_loss` to either `warp_rnnt` (build with `--no-build-isolation`) or a maintained RNNT op once available
