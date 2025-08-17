@@ -83,12 +83,21 @@ class LSRow:
 
 def scan_directory_for_wavs_text(data_dir: Path) -> List[LSRow]:
     rows: List[LSRow] = []
-    for wav_path in data_dir.rglob("*.flac"):
+    
+    # Scan for common audio file types
+    audio_extensions = ["*.flac", "*.wav", "*.mp3", "*.m4a"]
+    audio_files = []
+    for ext in audio_extensions:
+        audio_files.extend(data_dir.rglob(ext))
+
+    for wav_path in audio_files:
         try:
             info = torchaudio.info(str(wav_path))
             dur = float(info.num_frames) / float(info.sample_rate)
         except Exception:
             dur = 0.0
+        
+        # Check for transcription file with .txt extension
         txt_path = wav_path.with_suffix(".txt")
         text = ""
         if txt_path.exists():

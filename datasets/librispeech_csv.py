@@ -26,11 +26,12 @@ class LibriSpeechCSVDataset(torch.utils.data.Dataset):
         self.rows: List[Tuple[str, float, str]] = []
         p = Path(self.manifest)
         with p.open("r", encoding="utf-8") as f:
-            r = csv.DictReader(f)
-            for row in r:
-                path = row["path"]
-                dur = float(row["duration"]) if row.get("duration") else 0.0
-                text = row["text"]
+            reader = csv.reader(f)
+            header = next(reader)  # Skip header
+            for row in reader:
+                path = row[0]
+                dur = float(row[1]) if row[1] else 0.0
+                text = row[2]
                 if self.max_duration and dur > self.max_duration:
                     continue
                 self.rows.append((path, dur, text))

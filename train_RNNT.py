@@ -305,7 +305,7 @@ class DummyRNNTDataset(torch.utils.data.Dataset):
         """Return dataset size."""
         return self.num
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, str]:
         """Generate a single RNN-T training sample with random data.
         
         Creates realistic audio and text data for RNN-T training:
@@ -348,10 +348,10 @@ class DummyRNNTDataset(torch.utils.data.Dataset):
             size=(token_length,)
         )
         
-        return mel_features, acoustic_length, target_tokens
+        return mel_features, acoustic_length, target_tokens, "dummy text for wer calc"
 
 
-def collate(batch: list) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def collate(batch: list) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[str]]:
     """Collate function for variable-length RNN-T data batching.
     
     This function handles batching of variable-length audio sequences and
@@ -383,7 +383,7 @@ def collate(batch: list) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torc
     - Monitor memory usage for large batches on Apple Silicon
     - Unified memory enables larger sequences than discrete GPU
     """
-    features_list, feature_lengths, tokens_list = zip(*batch)
+    features_list, feature_lengths, tokens_list, texts = zip(*batch)
     batch_size = len(batch)
     
     # Find maximum dimensions for padding
@@ -399,7 +399,7 @@ def collate(batch: list) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torc
     padded_tokens = torch.zeros(batch_size, max_token_length + 1, dtype=torch.long)
     
     # Fill padded tensors with actual data
-    for batch_idx, (features, _, tokens) in enumerate(zip(features_list, feature_lengths, tokens_list)):
+    for batch_idx, (features, _, tokens, _) in enumerate(zip(features_list, feature_lengths, tokens_list, texts)):
         # Copy acoustic features
         acoustic_length = features.shape[0]
         padded_features[batch_idx, :acoustic_length] = features
@@ -418,7 +418,7 @@ def collate(batch: list) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torc
         dtype=torch.long
     )
     
-    return padded_features, feature_lengths_tensor, padded_tokens, token_lengths_tensor
+    return padded_features, feature_lengths_tensor, padded_tokens, token_lengths_tensor, list(texts)
 
 
 def rnnt_loss_naive_batch(logits: torch.Tensor, tokens: torch.Tensor, out_lens: torch.Tensor, token_lens: torch.Tensor, blank: int = 0) -> torch.Tensor:
@@ -629,7 +629,7 @@ def main():
 
     if args.manifest and HAS_LS:
         try:
-            ds = LibriSpeechCSVDataset(args.manifest)
+            ds = LibriSpeechCSVDataset(args.manifest, tokenizer=tokenizer)
             dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=ls_collate)
             print(f"Loaded LibriSpeech CSV: {args.manifest} ({len(ds)} rows)")
         except Exception as e:
