@@ -59,7 +59,11 @@ This project is divided into four distinct phases, moving from a basic functiona
 - [x] Establish script foundation
   - [x] Create `scripts/optimize.py` with placeholder logic for KD, QAT, and Pruning
   - [x] Create `scripts/export_coreml.py` with placeholder logic for stateful conversion
-- [ ] Implement Knowledge Distillation pipeline
+- [x] Implement Knowledge Distillation pipeline
+  - [x] Added `MCTModel.encode_only()` to expose encoder features for KD and analysis
+  - [x] Implemented KD short pass in `scripts/optimize.py --technique kd` using encoder-feature MSE
+  - [x] Added auto projection layer when teacher/student `d_model` mismatch
+  - [x] KD sanity (dev-clean slice): avg_loss ~3.5360; encoder throughput ~1436.5 frames/sec (bs=2)
 - [ ] Implement Quantization-Aware Training (QAT) pipeline
 - [ ] Implement Structured Pruning pipeline
 - [ ] Implement stateful Core ML export logic
@@ -143,3 +147,30 @@ Notes:
 - Encoder throughput: ~909–1214 frames/sec (bs=2, 64 samples, max_steps=20)
 - Approx WER in sanity logs: ~1.0 (expected for very short run + encoder-CTC loss)
 - Notes: Implemented torchaudio functional fallback; removed leading blank and cast lengths to int32; added clamping/slicing guard. Further RNNT wrapper work needed for full on-device/CPU RNNT.
+
+#### Latest RNNT short run (CPU-grad path; dev-clean slice)
+- Command:
+  ```bash
+  PYTORCH_ENABLE_MPS_FALLBACK=1 \
+  PYTHONPATH=".../Mamba-ASR-MPS" \
+  python Mamba-ASR-MPS/train_RNNT.py \
+    --epochs 1 --batch_size 2 \
+    --manifest "/Users/mattmireles/Documents/Training Data/LibriSpeech/dev-clean.csv" \
+    --num_workers 0 --max_samples 32 --max_steps 10 \
+    --device mps --rnnt_impl auto
+  ```
+- Device: `mps` (Apple Silicon); MPS fallback enabled
+- Backend selection: `torchaudio` available, but per-batch errors (`input/output length mismatch`)
+- Behavior: Per-batch automatic fallback to CPU RNNT with gradient mapping (`_rnnt_loss_cpu_with_grad`)
+- Throughput: encoder throughput ~962.3 frames/sec (bs=2)
+- WER: not logged on this run (manual grad path bypassed step logger); will add explicit logging in next run
+- Notes:
+  - `torchaudio.functional.rnnt_loss` is deprecated; acceptable for now, but will be removed in 2.9
+  - All batches succeeded via CPU-per-sample RNNT with gradient injection back to MPS logits
+  - Confirms "real RNN-T loss" path is working end-to-end for training on Apple Silicon
+
+#### Immediate next steps
+- Add explicit loss/greedy-WER logging when CPU-grad RNNT path is taken (currently skips standard logger)
+- Run a longer dev-clean epoch using the CPU-grad RNNT path to collect loss trajectory and initial WER
+- Tighten alignment-size guards based on observed T'/U distributions from LibriSpeech
+- Profile `selective_scan` hotspots with Instruments; annotate slow spans in code
