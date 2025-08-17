@@ -238,50 +238,39 @@ def export_to_coreml(
     print(f"Starting Core ML export to {output_path}...")
     pytorch_model.eval()
 
-    # 1. Trace the model with example inputs
-    # An example input tensor is needed to trace the model's execution graph.
-    example_input = torch.rand(1, chunk_length, feature_dim)
-    
-    # Placeholder for the Mamba state. This will be defined as a stateful
-    # input/output for the Core ML model.
-    # The shape would depend on the number of Mamba layers and their state sizes.
-    # For a single layer: (num_layers, batch_size, d_model, d_state)
-    example_state = torch.rand(1, 1, d_model, d_state)
+    # 1. Trace the model with example inputs (stateful streaming wrapper)
+    example_audio = torch.rand(1, chunk_length, feature_dim)
+    example_token = torch.zeros(1, 1, dtype=torch.long)
+    # Predictor GRU hidden state: (num_layers=1, batch=1, hidden=d_model)
+    example_hidden = torch.zeros(1, 1, d_model)
 
-    # It's often necessary to wrap the model in a nn.Module that handles
-    # the state explicitly for the tracer.
     class StatefulWrapper(nn.Module):
-        def __init__(self, model):
+        def __init__(self, model: nn.Module):
             super().__init__()
             self.model = model
 
-        def forward(self, x, state_in):
-            # This forward pass must match how the model will be used in a streaming fashion.
-            # It takes an input chunk and the previous state, and returns the output
-            # and the new state.
-            output, state_out = self.model.streaming_forward(x, state_in)
-            return output, state_out
+        def forward(self, audio_chunk: torch.Tensor, token_in: torch.Tensor, predictor_hidden: torch.Tensor):
+            logits_time, new_hidden = self.model.streaming_forward(audio_chunk, token_in, predictor_hidden)
+            return logits_time, new_hidden
 
-    # wrapped_model = StatefulWrapper(pytorch_model)
-    # traced_model = torch.jit.trace(wrapped_model, (example_input, example_state))
-    print("Model tracing placeholder...")
-    traced_model = pytorch_model # Placeholder
+    wrapped_model = StatefulWrapper(pytorch_model)
+    traced_model = torch.jit.trace(wrapped_model, (example_audio, example_token, example_hidden))
 
     # 2. Define the inputs and outputs for the Core ML model
     # Inputs will include the audio chunk and the input state.
     coreml_inputs = [
-        ct.TensorType(name="audio_chunk", shape=example_input.shape),
-        ct.StateType(name="mamba_state_in", wrapped_type=ct.TensorType(shape=example_state.shape)),
+        ct.TensorType(name="audio_chunk", shape=example_audio.shape),
+        ct.TensorType(name="token_in", shape=(1, 1)),
+        ct.StateType(name="predictor_hidden_in", wrapped_type=ct.TensorType(shape=example_hidden.shape)),
     ]
 
     # Outputs will include the transcription logits and the output state.
     # The output state from one prediction will be fed as the input state
     # to the next.
     coreml_outputs = [
-        # The shape of the logits will depend on the model's output.
-        # e.g., (1, chunk_length, vocab_size)
-        ct.TensorType(name="logits", shape=(1, chunk_length, 1024)), # Placeholder shape
-        ct.StateType(name="mamba_state_out", wrapped_type=ct.TensorType(shape=example_state.shape)),
+        # Logits over time for the given token_in (T' = chunk_length/4)
+        ct.TensorType(name="logits_time", shape=(1, max(1, chunk_length // 4), 1, CoreMLConstants.DEFAULT_VOCAB_SIZE)),
+        ct.StateType(name="predictor_hidden_out", wrapped_type=ct.TensorType(shape=example_hidden.shape)),
     ]
 
 
