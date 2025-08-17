@@ -125,6 +125,11 @@ Notes:
 - Backend: `--rnnt_impl ctc` (encoder-CTC fallback), bs=2, sanity
 - Encoder throughput: ~312.3 frames/sec (dummy)
 
+#### Short RNNT training (dummy) results
+- Command: `--epochs 1 --batch_size 2 --rnnt_impl ctc`
+- Throughput: ~607.6 frames/sec (encoder)
+- Notes: Loss decreased during the epoch (e.g., 9.45 → ~3.78); CTC fallback runs on CPU as expected on MPS.
+
 #### How to run (Phase 2)
 - Generate LibriSpeech CSV manifest (example):
 ```bash
