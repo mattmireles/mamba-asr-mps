@@ -11,6 +11,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd.profiler import record_function
 
 from .selective_scan_interface import selective_scan, init_hidden
 
@@ -54,8 +55,9 @@ class MambaBlock(nn.Module):
         B, L, D = x.shape
         h0 = init_hidden(B, D, self.cfg.state_dim, x.device)
 
-        u = self.in_proj(x)
-        z = self.z_proj(x)
+        with record_function("mamba_block_projections"):
+            u = self.in_proj(x)
+            z = self.z_proj(x)
 
         # Produce B and C per step using conv1d over time
         # Rearrange to (B,D,L)
@@ -64,16 +66,17 @@ class MambaBlock(nn.Module):
         C_proj = self.C_conv(u_t).transpose(1, 2)  # (B,L,N)
 
         delta = u  # simple parameterization for baseline
-        y = selective_scan(
-            x=u,
-            delta=delta,
-            A=self.A,
-            B_proj=B_proj,
-            C_proj=C_proj,
-            D=self.D,
-            z=z,
-            delta_bias=self.delta_bias,
-            h0=h0,
-        )
+        with record_function("mamba_block_selective_scan"):
+            y = selective_scan(
+                x=u,
+                delta=delta,
+                A=self.A,
+                B_proj=B_proj,
+                C_proj=C_proj,
+                D=self.D,
+                z=z,
+                delta_bias=self.delta_bias,
+                h0=h0,
+            )
         y = self.out_proj(y)
         return x + self.norm(y)
