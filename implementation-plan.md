@@ -170,6 +170,10 @@ Notes:
 - Throughput: encoder throughput ~962.3 fps (bs=2); ~800.8 fps on 20-step run; ~831.1 fps on 60-step run
 - Loss trajectory (60-step run): 283.63 → 87.12 → 224.45 → 325.42 → 339.07 → 209.43 → 68.58 (per 10-step snapshots)
 - WER: approx greedy WER remained ~1.000 during these very short passes (expected)
+- New flag: `--rnnt_cpu_grad` added to force CPU RNNT + grad mapping path. Test run (64 samples, 20 steps) shows logs like:
+  - `epoch 0 step 0 loss 4.1104 align(T'U')=38394 (T'=243, U=158) wer~1.000`
+  - `epoch 0 step 10 loss 2.9792 align(T'U')=44710 (T'=263, U=170) wer~1.000`
+  - Throughput in this run: ~1144.0 fps
 - Notes:
   - `torchaudio.functional.rnnt_loss` is deprecated; acceptable for now, but will be removed in 2.9
   - All batches succeeded via CPU-per-sample RNNT with gradient injection back to MPS logits
