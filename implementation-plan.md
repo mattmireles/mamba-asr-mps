@@ -116,3 +116,34 @@ Notes:
 - [x] LibriSpeech-backed RNNT data pipeline using CSV manifests (tokenizer + dataset + collate)
 - [x] Run LibriSpeech RNNT sanity training and record initial WER (approx greedy)
 - [x] Provide naive RNNT loss path (`--force_naive_rnnt`) for environments without RNNT loss
+
+#### RNNT sanity results (current)
+- Backend: `--rnnt_impl naive` (CTC grad fallback); MPS enabled with CPU fallbacks
+- Encoder throughput: ~132.2 frames/sec (dummy, bs=1)
+- Note: With `torchaudio`/`warp_rnnt` installed, loss will run natively (with automatic CPU fallback on MPS if required)
+
+#### How to run (Phase 2)
+- Generate LibriSpeech CSV manifest (example):
+```bash
+PYTHONPATH="$(pwd)/Mamba-ASR-MPS" \
+python Mamba-ASR-MPS/librispeech_prepare.py --root /path/to/LibriSpeech --output librispeech.csv
+```
+- RNNT sanity (tiny, naive path):
+```bash
+PYTHONPATH="$(pwd)/Mamba-ASR-MPS" PYTORCH_ENABLE_MPS_FALLBACK=1 \
+python Mamba-ASR-MPS/train_RNNT.py --epochs 1 --batch_size 1 --sanity \
+  --rnnt_impl naive --force_naive_rnnt --profile
+```
+- RNNT with auto backend selection (preferred):
+```bash
+PYTHONPATH="$(pwd)/Mamba-ASR-MPS" PYTORCH_ENABLE_MPS_FALLBACK=1 \
+python Mamba-ASR-MPS/train_RNNT.py --epochs 1 --batch_size 2 \
+  --manifest librispeech.csv --rnnt_impl auto --profile
+```
+
+#### Immediate next steps
+- [ ] Run a short RNNT training on LibriSpeech CSV and record initial WER, throughput, and peak memory
+- [ ] If `torchaudio.prototype.rnnt` is unavailable, install/use `warp_rnnt` and re-run with `--rnnt_impl warp_rnnt`
+- [ ] Profile `selective_scan_naive` with Instruments; confirm it dominates encoder time and capture tensor sizes
+- [ ] Tighten alignment guard based on real T' and U distributions from LibriSpeech
+- [ ] Document measured RNNT backend behavior on MPS (device vs CPU fallback) and any numerical notes
