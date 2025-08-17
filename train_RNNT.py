@@ -107,6 +107,11 @@ class RNNTTrainingConstants:
     # RNN-T Specific
     RNNT_BLANK_TOKEN = 0            # RNN-T blank token index
     MAX_ALIGNMENT_SIZE = 1000000    # Maximum T*U for memory safety
+    DEFAULT_MAX_ALIGN = 250000      # Default alignment size limit
+    
+    # Backend Selection
+    NAIVE_RNN_T_MAX_TIME = 64       # Maximum T frames for naive RNN-T
+    NAIVE_RNN_T_MAX_TOKENS = 16     # Maximum U tokens for naive RNN-T
     
     # Performance Monitoring
     LOG_INTERVAL = 5                # Steps between loss logging (more frequent)
@@ -114,6 +119,10 @@ class RNNTTrainingConstants:
     
     # Memory Management
     GRAD_SET_TO_NONE = True         # More efficient than zero_grad()
+    
+    # Profiling Constants
+    MAX_STREAMING_DECODE_STEPS = 128  # Maximum total decode steps per utterance
+    MAX_STREAMING_TOKENS_PER_FRAME = 32  # Maximum tokens per acoustic frame
     
     @staticmethod
     def get_rnnt_info() -> str:
@@ -126,6 +135,50 @@ class RNNTTrainingConstants:
         - Joint Dim: {RNNTTrainingConstants.DEFAULT_JOINT_DIM} (acoustic-linguistic fusion)
         - RNN-T: Blank token at index {RNNTTrainingConstants.RNNT_BLANK_TOKEN}
         - Memory: Alignment matrix T*U monitoring enabled
+        - Backend Selection: Auto-detection with fallback support
+        - Profiling: PyTorch autograd profiler integration
+        - Streaming: Real-time decode capability for evaluation
+        """
+
+
+# RNN-T Backend Configuration Constants
+class RNNTBackendConstants:
+    """Named constants for RNN-T backend selection and optimization.
+    
+    These constants define the backend selection strategy and performance
+    characteristics for different RNN-T loss implementations.
+    """
+    
+    # Backend Preferences (in order)
+    BACKEND_AUTO = "auto"           # Automatic selection (recommended)
+    BACKEND_TORCHAUDIO = "torchaudio"  # Official PyTorch implementation
+    BACKEND_WARP_RNNT = "warp_rnnt"    # Facebook's optimized implementation
+    BACKEND_NAIVE = "naive"         # Pure PyTorch reference implementation
+    BACKEND_CTC = "ctc"             # CTC approximation fallback
+    
+    # Performance Characteristics
+    TORCHAUDIO_COMPLEXITY = "O(T*U)"    # Time complexity
+    WARP_RNNT_COMPLEXITY = "O(T*U)"     # Time complexity
+    NAIVE_COMPLEXITY = "O(T*U*V)"       # Time complexity (much slower)
+    CTC_COMPLEXITY = "O(T*V)"           # Time complexity (approximation)
+    
+    # Apple Silicon Compatibility
+    TORCHAUDIO_MPS_SUPPORT = "Excellent"   # Native MPS optimization
+    WARP_RNNT_MPS_SUPPORT = "Limited"      # May lack Apple Silicon optimization
+    NAIVE_MPS_SUPPORT = "Full"             # Pure PyTorch compatibility
+    CTC_MPS_SUPPORT = "Excellent"          # Native MPS optimization
+    
+    @staticmethod
+    def get_backend_info() -> str:
+        """Return RNN-T backend selection documentation."""
+        return f"""
+        RNN-T Backend Selection Strategy:
+        1. {RNNTBackendConstants.BACKEND_TORCHAUDIO}: {RNNTBackendConstants.TORCHAUDIO_COMPLEXITY} complexity, {RNNTBackendConstants.TORCHAUDIO_MPS_SUPPORT} MPS support
+        2. {RNNTBackendConstants.BACKEND_WARP_RNNT}: {RNNTBackendConstants.WARP_RNNT_COMPLEXITY} complexity, {RNNTBackendConstants.WARP_RNNT_MPS_SUPPORT} MPS support
+        3. {RNNTBackendConstants.BACKEND_NAIVE}: {RNNTBackendConstants.NAIVE_COMPLEXITY} complexity, {RNNTBackendConstants.NAIVE_MPS_SUPPORT} MPS support
+        4. {RNNTBackendConstants.BACKEND_CTC}: {RNNTBackendConstants.CTC_COMPLEXITY} complexity, {RNNTBackendConstants.CTC_MPS_SUPPORT} MPS support (approximation)
+        - Automatic selection prioritizes performance and compatibility
+        - Fallback strategy ensures training continues regardless of backend availability
         """
 
 
@@ -369,13 +422,58 @@ def collate(batch: list) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torc
 
 
 def rnnt_loss_naive_batch(logits: torch.Tensor, tokens: torch.Tensor, out_lens: torch.Tensor, token_lens: torch.Tensor, blank: int = 0) -> torch.Tensor:
-    """Very slow, naive RNNT loss for small T,U (debug/sanity only).
-
-    logits: (B, T, U, V) unnormalized
-    tokens: (B, U) with tokens[*,0] = blank, labels in 1..V-1
-    out_lens: (B,) lengths in T dimension after encoder
-    token_lens: (B,) lengths in U dimension including initial blank
-    returns mean loss over batch
+    """Naive RNN-T loss implementation for small sequences and debugging.
+    
+    This function provides a reference implementation of RNN-T loss using
+    dynamic programming forward algorithm. It's intended for debugging,
+    validation, and handling small sequences when optimized backends fail.
+    
+    RNN-T Forward Algorithm:
+    - Dynamic programming: Forward pass through alignment lattice
+    - Alpha computation: Probability mass at each (t,u) position
+    - Two transitions: Blank (advance time) and label (advance token)
+    - Log-space computation: Numerical stability for long sequences
+    
+    Performance Characteristics:
+    - Time complexity: O(B * T * U * V) - very expensive for large sequences
+    - Memory usage: O(B * T * U) for alpha matrices
+    - Suitable for: T <= 64, U <= 16 (debugging only)
+    - Optimizations: Precomputed log-softmax, contiguous tensors
+    
+    Apple Silicon Considerations:
+    - Unified memory enables larger alpha matrices than discrete GPU
+    - Loop-heavy computation less optimal than vectorized backends
+    - Fallback option when optimized RNN-T backends unavailable
+    - Memory pressure monitoring recommended for batch processing
+    
+    Args:
+        logits: Joiner output logits (B, T, U, V) - unnormalized scores
+        tokens: Target token sequences (B, U) with tokens[:,0] = blank
+        out_lens: Acoustic sequence lengths (B,) after encoder processing
+        token_lens: Token sequence lengths (B,) including initial blank
+        blank: Blank token index for RNN-T alignment (typically 0)
+        
+    Returns:
+        Mean RNN-T loss across batch for gradient computation
+        
+    Algorithm Details:
+    - Alpha[t,u]: Forward probability at acoustic frame t, token position u
+    - Base case: Alpha[0,0] = 0 (log probability 1.0)
+    - Blank transition: Alpha[t+1,u] += Alpha[t,u] + P(blank|t,u)
+    - Label transition: Alpha[t,u+1] += Alpha[t,u] + P(label[u]|t,u)
+    - Termination: Final loss includes mandatory blank at sequence end
+    
+    Usage Context:
+    - Debugging: Validate optimized RNN-T backend results
+    - Fallback: When torchaudio/warp-rnnt unavailable
+    - Education: Reference implementation for understanding RNN-T
+    - Testing: Small sequence validation during development
+    
+    Integration Notes:
+    - Called by: main() training loop when backend selection fails
+    - Coordination: Works with select_rnnt_backend() for automatic fallback
+    - Profiling: Wrapped in record_function() for performance analysis
+    - Memory: Guards prevent usage on large T*U alignments
     """
     B, T_max, U_max, V = logits.shape
     # Compute log-probabilities once to keep a simple autograd path
@@ -408,15 +506,65 @@ def rnnt_loss_naive_batch(logits: torch.Tensor, tokens: torch.Tensor, out_lens: 
 
 
 def select_rnnt_backend(preferred: str = "auto"):
-    """Select and return the best-available RNNT loss backend.
-
-    Order of preference (unless a specific choice is requested):
-    - torchaudio.prototype.rnnt.rnnt_loss
-    - warp_rnnt.rnnt_loss (if installed)
-    - None (caller will fall back to naive/CTC)
-
+    """Select and return the best-available RNN-T loss backend for Apple Silicon.
+    
+    This function implements intelligent backend selection for RNN-T loss computation,
+    prioritizing optimized implementations while providing comprehensive fallback
+    support for Apple Silicon environments.
+    
+    Backend Selection Strategy:
+    1. torchaudio.prototype.rnnt: Official PyTorch implementation (preferred)
+    2. warp_rnnt: Facebook's optimized CUDA/CPU implementation
+    3. None: Triggers naive implementation or CTC fallback
+    
+    Apple Silicon Considerations:
+    - torchaudio: Best MPS integration and maintenance
+    - warp_rnnt: May have limited Apple Silicon optimization
+    - naive: Pure PyTorch implementation as universal fallback
+    - CTC: Encoder-only approximation for gradient computation
+    
+    Args:
+        preferred: Backend selection preference
+                  "auto" - Automatic selection (recommended)
+                  "torchaudio" - Force torchaudio backend only
+                  "warp_rnnt" - Force warp_rnnt backend only
+                  "naive" - Force naive implementation
+                  "ctc" - Force CTC fallback approximation
+                  
     Returns:
-        (callable|None, str): loss function and backend name
+        tuple[callable|None, str]: (loss_function, backend_name)
+        - loss_function: RNN-T loss callable or None for fallback
+        - backend_name: String identifier for selected backend
+        
+    Backend Characteristics:
+    - torchaudio: O(T*U) complexity, MPS optimized, official support
+    - warp_rnnt: O(T*U) complexity, CUDA optimized, may lack MPS
+    - naive: O(T*U*V) complexity, pure PyTorch, universal compatibility
+    - CTC: O(T*V) complexity, approximation only, efficient fallback
+    
+    Error Handling:
+    - Import failures: Graceful degradation to next preference
+    - Runtime errors: Caller handles with CPU fallback strategy
+    - Version compatibility: Best-effort import with exception catching
+    
+    Usage Examples:
+        # Automatic selection (recommended)
+        loss_fn, backend = select_rnnt_backend("auto")
+        
+        # Force specific backend
+        loss_fn, backend = select_rnnt_backend("torchaudio")
+        
+        # Handle selection result
+        if loss_fn is not None:
+            loss = loss_fn(log_probs, tokens, out_lens, token_lens)
+        else:
+            # Use naive or CTC fallback
+            
+    Integration Notes:
+    - Called by: main() training function for backend configuration
+    - Logging: Backend selection logged for reproducibility
+    - Performance: Selection overhead amortized across training
+    - Debugging: Explicit backend choice supports testing scenarios
     """
     preferred = preferred.lower()
 

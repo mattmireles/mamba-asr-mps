@@ -158,6 +158,8 @@ def selective_scan(
     assert delta_bias.shape == (d_model,), f"delta_bias shape mismatch: {delta_bias.shape}"
     assert h0.shape == (batch_size, d_model, state_dim), f"h0 shape mismatch: {h0.shape}"
 
+    # Profiling annotation for performance analysis on Apple Silicon
+    # Enables detailed timing analysis via PyTorch profiler and Instruments
     with record_function("selective_scan_naive"):
         # Step 1: Discretize parameters using softplus for numerical stability
         delta_positive = F.softplus(delta + delta_bias.view(1, 1, -1))  # (B, L, D)

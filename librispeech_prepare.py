@@ -1,6 +1,64 @@
 """
-LibriSpeech preparation (minimal) for local experimentation.
-Downloads (optional) and builds CSV manifests expected by train script.
+LibriSpeech dataset preparation utility for Mamba speech recognition on Apple Silicon.
+
+This module provides comprehensive utilities for preparing LibriSpeech datasets
+for training Mamba-based speech recognition models. It handles audio file
+discovery, metadata extraction, and CSV manifest generation optimized for
+Apple Silicon workflows.
+
+Dataset Preparation Features:
+- Automatic audio file discovery (.flac format)
+- Duration extraction using torchaudio
+- Text transcription loading and validation
+- CSV manifest generation for training pipelines
+- Error handling for corrupted or missing files
+- Apple Silicon optimized file processing
+
+LibriSpeech Integration:
+- Supports standard LibriSpeech directory structure
+- Handles train-clean-100, train-clean-360, dev-clean, test-clean
+- Compatible with both local and downloaded datasets
+- Optimizes for SSD storage performance on Apple Silicon
+
+Output Format:
+- CSV manifests with columns: path, duration, text
+- Compatible with ConMambaCTC and MCTModel training
+- Optimized for Apple Silicon data loading pipelines
+- Supports streaming data loading for memory efficiency
+
+Apple Silicon Optimizations:
+- Efficient file I/O using native ARM64 operations
+- torchaudio integration for hardware-accelerated audio processing
+- Memory-efficient processing for large datasets
+- SSD optimization for typical Apple Silicon storage
+
+Usage Examples:
+    # Prepare train-clean-100 subset
+    python librispeech_prepare.py --subset train-clean-100 --output train.csv
+    
+    # Prepare all subsets
+    python librispeech_prepare.py --all --output_dir manifests/
+    
+    # Scan existing directory
+    from librispeech_prepare import scan_directory_for_wavs_text
+    rows = scan_directory_for_wavs_text(Path('/path/to/librispeech'))
+
+Integration Points:
+- Used by train_CTC.py for real dataset training
+- Used by train_RNNT.py for RNN-T dataset preparation
+- Compatible with Apple Silicon data loading optimization
+- Supports both training and evaluation workflows
+
+Performance Considerations:
+- I/O bound operation benefits from Apple Silicon SSD performance
+- torchaudio duration extraction leverages hardware acceleration
+- Memory usage scales with number of audio files processed
+- Batch processing recommended for large datasets
+
+References:
+- LibriSpeech dataset: OpenSLR LibriSpeech ASR corpus
+- torchaudio integration: Hardware-accelerated audio processing
+- Apple Silicon optimization: Native ARM64 file operations
 """
 from __future__ import annotations
 

@@ -1,3 +1,47 @@
+"""
+Apple Silicon MPS benchmarking suite for Mamba speech recognition models.
+
+This module provides comprehensive performance benchmarking for ConMamba
+and related models on Apple Silicon hardware, with detailed MPS optimization
+analysis and performance profiling capabilities.
+
+Benchmarking Features:
+- Throughput measurement in frames per second
+- Memory usage analysis on unified memory architecture
+- GPU utilization monitoring via MPS profiler
+- Comparison against CPU and theoretical performance targets
+- Stress testing with various sequence lengths and batch sizes
+
+Apple Silicon Focus:
+- MPS backend performance characterization
+- Unified memory pressure analysis
+- Metal Performance Shader optimization validation
+- Apple Neural Engine interaction studies (where applicable)
+
+Performance Metrics:
+- Forward pass throughput (frames/sec)
+- Memory bandwidth utilization
+- GPU compute utilization
+- Memory pressure indicators
+- Thermal throttling detection
+
+Usage Examples:
+    # Basic benchmarking
+    python benchmarks/bench_mps.py --model conmamba --sequence_len 1000
+    
+    # Comprehensive analysis
+    python benchmarks/bench_mps.py --full_suite --profile
+
+Integration:
+- Used by development team for performance validation
+- Supports CI/CD performance regression testing
+- Enables hardware-specific optimization validation
+
+References:
+- Performance targets: README/Mamba-on-Apple-Silicon.md Section 5
+- Profiling guide: README/Mamba-on-Apple-Silicon.md Section 5.2
+- Optimization strategies: README/Mamba-on-Apple-Silicon.md Section 3-4
+"""
 from __future__ import annotations
 
 import os
