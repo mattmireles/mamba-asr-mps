@@ -744,6 +744,8 @@ def main():
     parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
     parser.add_argument("--device", type=str, default="auto", choices=["auto","cpu","mps","cuda"], help="Force device override for RNNT experiments")
     parser.add_argument("--rnnt_cpu_grad", action="store_true", help="Force CPU per-sample RNNT with gradient mapping (bypass on-device RNNT)")
+    parser.add_argument("--eval_after", action="store_true", help="Run a small greedy-decode evaluation after training to report avg WER")
+    parser.add_argument("--eval_samples", type=int, default=12, help="Number of samples to evaluate with greedy decode after training")
     args = parser.parse_args()
 
     device = get_device() if args.device == "auto" else torch.device(args.device)
@@ -1013,6 +1015,52 @@ def main():
     elapsed = time.time() - start
     if elapsed > 0:
         print(f"encoder throughput ~ {total_frames/elapsed:.1f} frames/sec (dummy)")
+
+    # Optional post-training evaluation with greedy decode for quick WER signal
+    if args.eval_after and HAS_LS and args.manifest:
+        try:
+            eval_ds = LibriSpeechCSVDataset(args.manifest, tokenizer=tokenizer)
+            eval_dl = torch.utils.data.DataLoader(eval_ds, batch_size=1, shuffle=False, collate_fn=ls_collate, num_workers=0)
+            model.eval()
+            total_wer = 0.0
+            num_eval = 0
+            with torch.no_grad():
+                for bidx, batch in enumerate(eval_dl):
+                    if bidx >= max(1, args.eval_samples):
+                        break
+                    feats, feat_lens, _tokens, _token_lens, texts = batch
+                    feats = feats.to(device)
+                    feat_lens = feat_lens.to(device)
+                    # Greedy RNN-T decode using streaming predictor
+                    enc_in = model.frontend(feats)            # (1, T', D)
+                    enc_out = model.encoder(enc_in)           # (1, T', D)
+                    Tprime = int(enc_out.shape[1])
+                    hidden = None
+                    token_cur = torch.zeros(1, dtype=torch.long, device=device)
+                    hyp_ids: list[int] = []
+                    max_total = RNNTTrainingConstants.MAX_STREAMING_DECODE_STEPS
+                    total_dec = 0
+                    for t in range(Tprime):
+                        u = 0
+                        while u < RNNTTrainingConstants.MAX_STREAMING_TOKENS_PER_FRAME and total_dec < max_total:
+                            pred_step, hidden = model.predictor.forward_streaming(token_cur.unsqueeze(1), hidden)
+                            logits_tu = model.joiner(enc_out[:, t:t+1, :], pred_step)
+                            next_id = int(logits_tu[0, 0, 0].argmax().item())
+                            total_dec += 1
+                            if next_id == RNNTTrainingConstants.RNNT_BLANK_TOKEN:
+                                break
+                            hyp_ids.append(next_id)
+                            token_cur = torch.tensor([next_id], dtype=torch.long, device=device)
+                            u += 1
+                    hyp_text = tokenizer.decode(hyp_ids)
+                    ref_text = tokenizer.normalize(texts[0])
+                    total_wer += wer(ref_text, hyp_text)
+                    num_eval += 1
+            if num_eval > 0:
+                print(f"post-train eval: avg WER over {num_eval} samples = {total_wer/num_eval:.3f}")
+            model.train()
+        except Exception as e:
+            print(f"Eval failed: {e}")
 
 
 if __name__ == "__main__":
