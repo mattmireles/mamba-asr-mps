@@ -3,9 +3,10 @@ import CoreML
 
 func loadMLModel(at path: String) throws -> MLModel {
     let url = URL(fileURLWithPath: path)
+    let compiledURL = try MLModel.compileModel(at: url)
     let config = MLModelConfiguration()
     config.computeUnits = .all
-    return try MLModel(contentsOf: url, configuration: config)
+    return try MLModel(contentsOf: compiledURL, configuration: config)
 }
 
 func runOnce(model: MLModel) throws {
@@ -40,15 +41,27 @@ func runOnce(model: MLModel) throws {
 
 let args = CommandLine.arguments
 let mlpackagePath: String
+let compiledPath: String
 if args.count > 1 {
     mlpackagePath = args[1]
+    compiledPath = (args.count > 2) ? args[2] : "../../MambaASR.mlmodelc"
 } else {
     // default relative to repo root
     mlpackagePath = "../../MambaASR.mlpackage"
+    compiledPath = "../../MambaASR.mlmodelc"
 }
 
 do {
-    let model = try loadMLModel(at: mlpackagePath)
+    // prefer compiled path if available
+    let compiledURL = URL(fileURLWithPath: compiledPath)
+    let model: MLModel
+    if FileManager.default.fileExists(atPath: compiledURL.path) {
+        let config = MLModelConfiguration()
+        config.computeUnits = .all
+        model = try MLModel(contentsOf: compiledURL, configuration: config)
+    } else {
+        model = try loadMLModel(at: mlpackagePath)
+    }
     try runOnce(model: model)
     print("Inference OK")
 } catch {

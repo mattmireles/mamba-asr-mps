@@ -84,6 +84,9 @@ This project is divided into four distinct phases, moving from a basic functiona
 - [ ] Convert to `.mlpackage`; verify model interface (inputs: audio_chunk, mamba_state_in; outputs: logits, mamba_state_out)
 - [x] Convert to `.mlpackage` (stateful wrapper traced; `MAMBA_DISABLE_RECORD_FUNCTION=1` required)
 - [ ] Validate converted model on device and verify ANE execution
+  - [x] Added SwiftPM CLI `swift/MambaASRRunner` to load/run model once
+  - [x] Verified Core ML conversion by compiling with `xcrun coremlcompiler` and loading shapes via CLI
+  - [ ] Wire real mel features + streaming state loop; verify ANE via Activity Monitor
 
 ### Phase 4: Building the Native Swift Inference Pipeline
 
