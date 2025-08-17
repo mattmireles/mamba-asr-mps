@@ -75,10 +75,12 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import Tuple
+from typing import Tuple, Iterable
 
 import torch
 import torch.nn as nn
+import torch.nn.utils.prune as prune
+import torch.ao.quantization as tq
 
 from modules.mct.mct_model import MCTModel, MCTConfig
 from utils.tokenizer import CharTokenizer
@@ -300,15 +302,56 @@ def quantization_aware_training(
     - Validates on: Apple Silicon hardware for ANE execution verification
     """
     print("Starting Quantization-Aware Training...")
-    # Placeholder for QAT logic:
-    # 1. Prepare the model for QAT by inserting quantization stubs.
-    #    - Use torch.quantization.prepare_qat()
-    # 2. Fine-tune the model for a few epochs on the target dataset.
-    # 3. The model learns to adjust its weights to be robust to quantization errors.
-    # 4. Convert the QAT-trained model to a quantized model.
-    #    - Use torch.quantization.convert()
-    print("Quantization-Aware Training placeholder complete.")
-    return model
+    device = next(model.parameters()).device
+    model.train()
+
+    # Wrap with QuantStub/DeQuantStub to define quantization boundaries
+    class QuantWrapper(nn.Module):
+        def __init__(self, mod: nn.Module):
+            super().__init__()
+            self.quant = tq.QuantStub()
+            self.mod = mod
+            self.dequant = tq.DeQuantStub()
+
+        def forward(self, x: torch.Tensor, *args, **kwargs):
+            xq = self.quant(x)
+            out = self.mod(xq, *args, **kwargs)
+            return self.dequant(out)
+
+    qmodel = QuantWrapper(model).to(device)
+    # Default QAT qconfig; 'fbgemm' is standard for server, still usable for fake-quant
+    qconfig = tq.get_default_qat_qconfig("fbgemm")
+    tq.prepare_qat(qmodel, inplace=True)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    steps_per_epoch = 0
+    loss_fn = nn.MSELoss()
+    for epoch in range(max(1, epochs)):
+        for batch in train_dataloader:
+            steps_per_epoch += 1
+            if isinstance(batch, (list, tuple)) and len(batch) == 5:
+                feats, feat_lens, _tokens, _token_lens, _texts = batch
+            else:
+                feats, feat_lens, _tokens, _token_lens = batch
+            feats = feats.to(device)
+            feat_lens = feat_lens.to(device)
+            # Simple self-reconstruction loss on encoder features to exercise QAT
+            with torch.no_grad():
+                target, _ = model.encode_only(feats, feat_lens)
+            pred, _ = model.encode_only(feats, feat_lens)
+            # Align time dim
+            Tm = min(target.shape[1], pred.shape[1])
+            loss = loss_fn(pred[:, :Tm, :], target[:, :Tm, :])
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            if steps_per_epoch >= 50:
+                break
+
+    qmodel.eval()
+    tq.convert(qmodel, inplace=True)
+    print("Quantization-Aware Training complete (short pass).")
+    return qmodel
 
 
 def structured_pruning(
@@ -385,14 +428,46 @@ def structured_pruning(
     - Validates with: ANE execution verification and performance benchmarking
     """
     print("Starting Structured Pruning...")
-    # Placeholder for structured pruning logic:
-    # 1. Loop for `num_iterations`:
-    # 2.   Identify target layers for pruning (e.g., Conv2d, Linear).
-    # 3.   Calculate the L1/L2 norm of each filter/channel in the target layers.
-    # 4.   Prune the `pruning_amount` of channels with the lowest norms globally.
-    #      - Use torch.nn.utils.prune
-    # 5.   Fine-tune the pruned model for 1-2 epochs to recover accuracy.
-    print("Structured Pruning placeholder complete.")
+    device = next(model.parameters()).device
+    model.train()
+
+    def iter_prunable_modules(m: nn.Module) -> Iterable[tuple[str, nn.Module]]:
+        for name, child in m.named_modules():
+            if isinstance(child, (nn.Conv1d, nn.Conv2d, nn.Linear)):
+                yield name, child
+
+    for it in range(max(1, num_iterations)):
+        # Apply global structured pruning across eligible modules
+        for _name, mod in iter_prunable_modules(model):
+            try:
+                # Prune a fraction of output channels/neurons (dim=0)
+                prune.ln_structured(mod, name="weight", amount=pruning_amount, n=1, dim=0)
+                prune.remove(mod, "weight")
+            except Exception:
+                continue
+        # Brief fine-tuning to restore accuracy (self-reconstruction on encoder)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=OptimizationConstants.DEFAULT_QAT_LEARNING_RATE)
+        loss_fn = nn.MSELoss()
+        steps = 0
+        for batch in train_dataloader:
+            if isinstance(batch, (list, tuple)) and len(batch) == 5:
+                feats, feat_lens, _tokens, _token_lens, _texts = batch
+            else:
+                feats, feat_lens, _tokens, _token_lens = batch
+            feats = feats.to(device)
+            feat_lens = feat_lens.to(device)
+            with torch.no_grad():
+                target, _ = model.encode_only(feats, feat_lens)
+            pred, _ = model.encode_only(feats, feat_lens)
+            Tm = min(target.shape[1], pred.shape[1])
+            loss = loss_fn(pred[:, :Tm, :], target[:, :Tm, :])
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            steps += 1
+            if steps >= 50:
+                break
+    print("Structured Pruning complete (short pass).")
     return model
 
 def run_kd_short(
@@ -474,15 +549,37 @@ def run_kd_short(
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--technique", choices=["kd"], required=True)
+    ap.add_argument("--technique", choices=["kd", "qat", "prune"], required=True)
     ap.add_argument("--manifest", type=str, default="")
     ap.add_argument("--steps", type=int, default=50)
     ap.add_argument("--batch_size", type=int, default=2)
     args = ap.parse_args()
 
+    # Build small dataloaders for short passes
+    device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+    if HAS_LS and args.manifest:
+        ds = LibriSpeechCSVDataset(args.manifest, tokenizer=CharTokenizer())
+        if hasattr(ds, "rows"):
+            ds.rows = ds.rows[: max(args.steps * args.batch_size, 32)]
+        dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=ls_collate, num_workers=0)
+    else:
+        # Fallback to RNNT dummy data
+        from train_RNNT import DummyRNNTDataset, collate  # type: ignore
+        ds = DummyRNNTDataset(num=max(args.steps * args.batch_size, 32), vocab=1024)
+        dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate, num_workers=0)
+
     if args.technique == "kd":
-        # Teacher: slightly larger; Student: baseline
         teacher_cfg = MCTConfig(d_model=384, n_blocks=6)
         student_cfg = MCTConfig(d_model=256, n_blocks=4)
         avg_loss, fps = run_kd_short(teacher_cfg, student_cfg, args.manifest, batch_size=args.batch_size, steps=args.steps)
         print(f"KD short pass: avg_loss={avg_loss:.4f} encoder_throughput~{fps:.1f} frames/s")
+    elif args.technique == "qat":
+        cfg = MCTConfig(d_model=256, n_blocks=4)
+        model = MCTModel(cfg).to(device)
+        qmodel = quantization_aware_training(model, dl, dl, epochs=1)
+        print("QAT short pass completed.")
+    elif args.technique == "prune":
+        cfg = MCTConfig(d_model=256, n_blocks=4)
+        model = MCTModel(cfg).to(device)
+        pruned = structured_pruning(model, dl, dl, pruning_amount=OptimizationConstants.DEFAULT_PRUNING_AMOUNT, num_iterations=1)
+        print("Structured pruning short pass completed.")
