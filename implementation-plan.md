@@ -174,6 +174,11 @@ Notes:
   - `epoch 0 step 0 loss 4.1104 align(T'U')=38394 (T'=243, U=158) wer~1.000`
   - `epoch 0 step 10 loss 2.9792 align(T'U')=44710 (T'=263, U=170) wer~1.000`
   - Throughput in this run: ~1144.0 fps
+
+##### Quick post-train evaluation (greedy decode)
+- Trainer now supports `--eval_after --eval_samples N` for a small greedy-decode WER estimate
+- Example (64 samples, 20 steps, CPU-grad): `post-train eval: avg WER over 12 samples = 1.000`
+- Expected: WER near 1.0 at this stage; serves only as a smoke test
 - Notes:
   - `torchaudio.functional.rnnt_loss` is deprecated; acceptable for now, but will be removed in 2.9
   - All batches succeeded via CPU-per-sample RNNT with gradient injection back to MPS logits
