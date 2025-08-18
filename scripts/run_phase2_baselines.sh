@@ -3,6 +3,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 EXPORTS_DIR="$ROOT_DIR/exports"
 mkdir -p "$EXPORTS_DIR"
+COREML_DIR="$EXPORTS_DIR/CoreMLTraces"
+mkdir -p "$COREML_DIR"
 
 SANITY_FLAGS=(--sanity --epochs 1 --batch_size 2 --max_steps 60)
 
@@ -24,3 +26,14 @@ run_case cpu_grad   --force_cpu_grad
 run_case ctc        --rnnt_impl ctc
 
 echo "Phase 2 baseline runs complete. See $EXPORTS_DIR for CSV/JSON outputs." 
+
+# If latency CSV exists from Swift runner, summarize it for the docs
+LATCSV="$COREML_DIR/latency_probe.csv"
+if [[ -f "$LATCSV" ]]; then
+  python "$ROOT_DIR/scripts/summarize_latency_csv.py" \
+    --csv "$LATCSV" \
+    --out "$COREML_DIR/latency_summary.md" || true
+  echo "Latency summary written to $COREML_DIR/latency_summary.md"
+else
+  echo "No latency CSV found at $LATCSV (run Swift runner to generate)."
+fi
