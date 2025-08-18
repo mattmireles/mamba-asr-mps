@@ -83,7 +83,18 @@ import torch.nn.utils.prune as prune
 import torch.ao.quantization as tq
 
 from modules.mct.mct_model import MCTModel, MCTConfig
-from utils.tokenizer import CharTokenizer
+try:
+    from utils.tokenizer import CharTokenizer
+except ModuleNotFoundError:
+    import sys as _sys, os as _os
+    _base = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
+    _sys.path.insert(0, _base)
+    _sys.path.insert(0, _os.path.join(_base, "utils"))
+    try:
+        from utils.tokenizer import CharTokenizer
+    except ModuleNotFoundError:
+        import tokenizer as _tok  # type: ignore
+        CharTokenizer = _tok.CharTokenizer
 try:
     from datasets.librispeech_csv import LibriSpeechCSVDataset, collate_fn as ls_collate
     HAS_LS = True
@@ -305,6 +316,75 @@ def quantization_aware_training(
     device = next(model.parameters()).device
     model.train()
 
+    # Try PT2E quantization path first (torchao/pt2e API). Fallback to Eager QAT.
+    try:
+        from torch.ao.quantization.quantize_pt2e import (
+            prepare_qat_pt2e as _prepare_qat_pt2e,
+            convert_pt2e as _convert_pt2e,
+        )
+        from torch.ao.quantization.qconfig_mapping import (
+            get_default_qat_qconfig_mapping as _get_default_qat_qconfig_mapping,
+        )
+        print("[QAT] Using PT2E API")
+        # Build a tiny example batch to drive prepare
+        example_feats = None
+        example_feat_lens = None
+        for batch in train_dataloader:
+            if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+                example_feats, example_feat_lens = batch[0].to(device), batch[1].to(device)
+            else:
+                example_feats, example_feat_lens = batch[0].to(device), batch[1].to(device)
+            break
+        if example_feats is None:
+            raise RuntimeError("No example batch available for PT2E QAT prepare")
+
+        qconfig_mapping = _get_default_qat_qconfig_mapping("fbgemm")
+        # Wrap a small callable to match encode_only signature used during training below
+        model_for_qat = model
+        model_for_qat.train()
+        prepared = _prepare_qat_pt2e(model_for_qat, qconfig_mapping, example_inputs=(example_feats, example_feat_lens))
+
+        optimizer = torch.optim.AdamW(prepared.parameters(), lr=lr)
+        import time as _time
+        total_frames = 0
+        start = _time.time()
+        last_loss = None
+        loss_fn = nn.MSELoss()
+        steps_done = 0
+        for epoch in range(max(1, epochs)):
+            for batch in train_dataloader:
+                if isinstance(batch, (list, tuple)) and len(batch) == 5:
+                    feats, feat_lens, _tokens, _token_lens, _texts = batch
+                else:
+                    feats, feat_lens, _tokens, _token_lens = batch
+                feats = feats.to(device)
+                feat_lens = feat_lens.to(device)
+                with torch.no_grad():
+                    target, _ = prepared.encode_only(feats, feat_lens)
+                pred, _ = prepared.encode_only(feats, feat_lens)
+                Tm = min(target.shape[1], pred.shape[1])
+                loss = loss_fn(pred[:, :Tm, :], target[:, :Tm, :])
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+                total_frames += int(feat_lens.sum().item())
+                last_loss = float(loss.item())
+                steps_done += 1
+                if steps_done >= 50:
+                    break
+            if steps_done >= 50:
+                break
+        prepared.eval()
+        qmodel = _convert_pt2e(prepared)
+        if device.type == "mps":
+            torch.mps.synchronize()
+        elapsed = _time.time() - start
+        fps = total_frames / elapsed if elapsed > 0 else 0.0
+        print(f"PT2E QAT complete (short pass). last_loss={last_loss if last_loss is not None else 'n/a'} encoder_throughput~{fps:.1f} frames/s")
+        return qmodel
+    except Exception as e:
+        print(f"[QAT] PT2E unavailable or failed: {e}. Falling back to Eager QAT.")
+
     # Wrap with QuantStub/DeQuantStub to define quantization boundaries
     class QuantWrapper(nn.Module):
         def __init__(self, mod: nn.Module):
@@ -319,13 +399,18 @@ def quantization_aware_training(
             return self.dequant(out)
 
     qmodel = QuantWrapper(model).to(device)
-    # Default QAT qconfig; 'fbgemm' is standard for server, still usable for fake-quant
+    # Default QAT qconfig; 'fbgemm' works for fake-quant on desktop
     qconfig = tq.get_default_qat_qconfig("fbgemm")
     tq.prepare_qat(qmodel, inplace=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     steps_per_epoch = 0
     loss_fn = nn.MSELoss()
+    # Simple throughput metric
+    import time as _time
+    total_frames = 0
+    start = _time.time()
+    last_loss = None
     for epoch in range(max(1, epochs)):
         for batch in train_dataloader:
             steps_per_epoch += 1
@@ -345,12 +430,18 @@ def quantization_aware_training(
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
+            total_frames += int(feat_lens.sum().item())
+            last_loss = float(loss.item())
             if steps_per_epoch >= 50:
                 break
 
     qmodel.eval()
     tq.convert(qmodel, inplace=True)
-    print("Quantization-Aware Training complete (short pass).")
+    if device.type == "mps":
+        torch.mps.synchronize()
+    elapsed = _time.time() - start
+    fps = total_frames / elapsed if elapsed > 0 else 0.0
+    print(f"Quantization-Aware Training complete (short pass). last_loss={last_loss if last_loss is not None else 'n/a'} encoder_throughput~{fps:.1f} frames/s")
     return qmodel
 
 
@@ -360,6 +451,7 @@ def structured_pruning(
     val_dataloader,
     pruning_amount: float = OptimizationConstants.DEFAULT_PRUNING_AMOUNT,
     num_iterations: int = OptimizationConstants.DEFAULT_PRUNING_ITERATIONS,
+    layer_sparsity: dict[str, float] | None = None,
 ):
     """Structured pruning for hardware-friendly MCT model compression.
     
@@ -436,12 +528,25 @@ def structured_pruning(
             if isinstance(child, (nn.Conv1d, nn.Conv2d, nn.Linear)):
                 yield name, child
 
+    # Simple throughput metric across fine-tune steps
+    import time as _time
+    total_frames = 0
+    start = _time.time()
+    last_loss = None
     for it in range(max(1, num_iterations)):
-        # Apply global structured pruning across eligible modules
+        # Apply structured pruning across eligible modules with optional per-layer sparsity
         for _name, mod in iter_prunable_modules(model):
             try:
+                # Determine amount per module
+                amount = pruning_amount
+                if layer_sparsity is not None:
+                    # Match by substring of module path or by class name keys
+                    for key, val in layer_sparsity.items():
+                        if key in _name or (key.lower() == type(mod).__name__.lower()):
+                            amount = float(val)
+                            break
                 # Prune a fraction of output channels/neurons (dim=0)
-                prune.ln_structured(mod, name="weight", amount=pruning_amount, n=1, dim=0)
+                prune.ln_structured(mod, name="weight", amount=amount, n=1, dim=0)
                 prune.remove(mod, "weight")
             except Exception:
                 continue
@@ -464,10 +569,16 @@ def structured_pruning(
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
+            total_frames += int(feat_lens.sum().item())
+            last_loss = float(loss.item())
             steps += 1
             if steps >= 50:
                 break
-    print("Structured Pruning complete (short pass).")
+    if device.type == "mps":
+        torch.mps.synchronize()
+    elapsed = _time.time() - start
+    fps = total_frames / elapsed if elapsed > 0 else 0.0
+    print(f"Structured Pruning complete (short pass). last_loss={last_loss if last_loss is not None else 'n/a'} encoder_throughput~{fps:.1f} frames/s")
     return model
 
 def run_kd_short(
@@ -477,10 +588,10 @@ def run_kd_short(
     batch_size: int = 2,
     steps: int = 50,
     device: torch.device | None = None,
-) -> Tuple[float, float]:
+) -> Tuple[nn.Module, float, float]:
     """Run a short KD pass using encoder feature MSE between teacher and student.
 
-    Returns (avg_loss, throughput_fps).
+    Returns (student_model, avg_loss, throughput_fps).
     """
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     device = device or (torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu"))
@@ -544,7 +655,7 @@ def run_kd_short(
     elapsed = time.time() - start
     fps = total_frames / elapsed if elapsed > 0 else 0.0
     avg_loss = total_loss / max(1, step)
-    return avg_loss, fps
+    return student, avg_loss, fps
 
 
 if __name__ == "__main__":
@@ -553,6 +664,11 @@ if __name__ == "__main__":
     ap.add_argument("--manifest", type=str, default="")
     ap.add_argument("--steps", type=int, default=50)
     ap.add_argument("--batch_size", type=int, default=2)
+    ap.add_argument("--sparsity", type=float, default=OptimizationConstants.DEFAULT_PRUNING_AMOUNT,
+                    help="Global pruning fraction per iteration (fallback if no layer map)")
+    ap.add_argument("--sparsity_map", type=str, default="",
+                    help="JSON string or path to JSON file mapping layer name substrings or class names to sparsity (e.g. '{\"Conv2d\":0.4,\"Linear\":0.3}')")
+    ap.add_argument("--save_model", type=str, default="", help="Optional path to save resulting model state_dict (.pt)")
     args = ap.parse_args()
 
     # Build small dataloaders for short passes
@@ -571,15 +687,57 @@ if __name__ == "__main__":
     if args.technique == "kd":
         teacher_cfg = MCTConfig(d_model=384, n_blocks=6)
         student_cfg = MCTConfig(d_model=256, n_blocks=4)
-        avg_loss, fps = run_kd_short(teacher_cfg, student_cfg, args.manifest, batch_size=args.batch_size, steps=args.steps)
+        student_model, avg_loss, fps = run_kd_short(teacher_cfg, student_cfg, args.manifest, batch_size=args.batch_size, steps=args.steps)
         print(f"KD short pass: avg_loss={avg_loss:.4f} encoder_throughput~{fps:.1f} frames/s")
+        if args.save_model:
+            os.makedirs(os.path.dirname(args.save_model), exist_ok=True)
+            torch.save({
+                "model_state": student_model.state_dict(),
+                "config": student_cfg.__dict__,
+                "technique": "kd"
+            }, args.save_model)
+            print(f"Saved KD student model to {args.save_model}")
     elif args.technique == "qat":
         cfg = MCTConfig(d_model=256, n_blocks=4)
         model = MCTModel(cfg).to(device)
         qmodel = quantization_aware_training(model, dl, dl, epochs=1)
         print("QAT short pass completed.")
+        if args.save_model:
+            os.makedirs(os.path.dirname(args.save_model), exist_ok=True)
+            torch.save({
+                "model_state": qmodel.state_dict(),
+                "config": cfg.__dict__,
+                "technique": "qat"
+            }, args.save_model)
+            print(f"Saved QAT model to {args.save_model}")
     elif args.technique == "prune":
         cfg = MCTConfig(d_model=256, n_blocks=4)
         model = MCTModel(cfg).to(device)
-        pruned = structured_pruning(model, dl, dl, pruning_amount=OptimizationConstants.DEFAULT_PRUNING_AMOUNT, num_iterations=1)
+        # Resolve sparsity map
+        sparsity_map: dict[str, float] | None = None
+        if args.sparsity_map:
+            import json, os
+            sm_arg = args.sparsity_map
+            try:
+                if os.path.isfile(sm_arg):
+                    with open(sm_arg, "r") as f:
+                        sparsity_map = json.load(f)
+                else:
+                    sparsity_map = json.loads(sm_arg)
+            except Exception:
+                sparsity_map = None
+        pruned = structured_pruning(
+            model, dl, dl,
+            pruning_amount=(args.sparsity if args.sparsity is not None else OptimizationConstants.DEFAULT_PRUNING_AMOUNT),
+            num_iterations=1,
+            layer_sparsity=sparsity_map,
+        )
         print("Structured pruning short pass completed.")
+        if args.save_model:
+            os.makedirs(os.path.dirname(args.save_model), exist_ok=True)
+            torch.save({
+                "model_state": pruned.state_dict(),
+                "config": cfg.__dict__,
+                "technique": "prune"
+            }, args.save_model)
+            print(f"Saved pruned model to {args.save_model}")

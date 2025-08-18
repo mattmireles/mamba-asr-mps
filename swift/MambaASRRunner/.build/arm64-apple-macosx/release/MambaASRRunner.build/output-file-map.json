@@ -1,0 +1,12 @@
+{
+  "": {
+    "dependencies": "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/MambaASRRunner.d",
+    "object": "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/MambaASRRunner.o",
+    "swift-dependencies": "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/master.swiftdeps"
+  },
+  "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/Sources/MambaASRRunner/main.swift": {
+    "object": "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/main.swift.o",
+    "swiftmodule": "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/main.swiftdeps"
+  }
+}

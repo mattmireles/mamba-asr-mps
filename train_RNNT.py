@@ -81,8 +81,23 @@ try:
     HAS_LS = True
 except Exception:
     HAS_LS = False
-from utils.tokenizer import CharTokenizer
-from utils.metrics import wer
+try:
+    from utils.tokenizer import CharTokenizer
+    from utils.metrics import wer
+except ModuleNotFoundError:
+    import sys as _sys, os as _os
+    _base = _os.path.abspath(_os.path.dirname(__file__))
+    _sys.path.insert(0, _base)
+    _sys.path.insert(0, _os.path.join(_base, "utils"))
+    try:
+        from utils.tokenizer import CharTokenizer
+        from utils.metrics import wer
+    except ModuleNotFoundError:
+        # Fallback to direct module import from added utils/ path
+        import tokenizer as _tok  # type: ignore
+        import metrics as _met  # type: ignore
+        CharTokenizer = _tok.CharTokenizer
+        wer = _met.wer
 
 
 # RNN-T Training Configuration Constants
@@ -743,9 +758,14 @@ def main():
     parser.add_argument("--max_steps", type=int, default=0, help="Limit number of optimizer steps for a short pass (0 = full epoch)")
     parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
     parser.add_argument("--device", type=str, default="auto", choices=["auto","cpu","mps","cuda"], help="Force device override for RNNT experiments")
-    parser.add_argument("--rnnt_cpu_grad", action="store_true", help="Force CPU per-sample RNNT with gradient mapping (bypass on-device RNNT)")
+    parser.add_argument("--rnnt_cpu_grad", action="store_true", help="Deprecated: CPU-grad fallback is always enabled automatically when fast backend fails. Use --force_cpu_grad to force CPU-grad for all batches.")
+    parser.add_argument("--force_cpu_grad", action="store_true", help="Force CPU per-sample RNNT with gradient mapping for all batches (stability baseline)")
     parser.add_argument("--eval_after", action="store_true", help="Run a small greedy-decode evaluation after training to report avg WER")
     parser.add_argument("--eval_samples", type=int, default=12, help="Number of samples to evaluate with greedy decode after training")
+    parser.add_argument("--grad_clip", type=float, default=0.0, help="Clip global grad-norm to this value (0 disables)")
+    parser.add_argument("--skip_non_finite", action="store_true", help="Skip optimizer step when loss is non-finite (nan/inf)")
+    parser.add_argument("--log_csv", type=str, default="", help="Optional path to write per-step metrics CSV (step, loss, t_cap, u_cap, align, backend, finite)")
+    parser.add_argument("--save_ckpt", type=str, default="", help="Optional path to save a checkpoint at the end of training (.pt)")
     args = parser.parse_args()
 
     device = get_device() if args.device == "auto" else torch.device(args.device)
@@ -786,6 +806,22 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=3e-4)
 
     model.train()
+
+    # Metrics aggregation for structured logging and analysis
+    import math, csv  # Local imports to avoid polluting global namespace
+    align_values: list[int] = []
+    t_caps: list[int] = []
+    u_caps: list[int] = []
+    backend_use_counts = {"ta": 0, "warp": 0, "naive": 0, "ctc": 0, "cpu_grad": 0, "unknown": 0}
+    csv_writer = None
+    csv_file_handle = None
+    if args.log_csv:
+        try:
+            csv_file_handle = open(args.log_csv, "w", newline="")
+            csv_writer = csv.writer(csv_file_handle)
+            csv_writer.writerow(["epoch", "step", "loss", "t_cap", "u_cap", "align", "backend", "finite"])
+        except Exception:
+            csv_writer = None
 
     # Optional MPS profiling
     try:
@@ -831,7 +867,67 @@ def main():
                 else:
                     rnnt_use_naive = (rnnt_backend == "naive") or (rnnt_backend == "none" and (logits.shape[1] <= 64 and logits.shape[2] <= 16))
                 # logits: (B, T, U, V)
-                if (not args.force_naive_rnnt) and (rnnt_loss is not None) and (rnnt_backend in ("torchaudio", "warp_rnnt")) and (not args.rnnt_cpu_grad):
+                backend_used = "unknown"
+                # If explicitly requested, run CPU-grad RNNT per-batch (stability baseline)
+                if args.force_cpu_grad and (rnnt_loss is not None) and (rnnt_backend in ("torchaudio", "warp_rnnt")):
+                    try:
+                        loss_cpu, grad_logits = _rnnt_loss_cpu_with_grad(rnnt_loss, logits.detach(), tokens, out_lens, token_lens, blank=0)
+                        optimizer.zero_grad(set_to_none=True)
+                        logits.backward(grad_logits)
+                        optimizer.step()
+                        loss = loss_cpu
+                        backend_used = "cpu_grad"
+                        if step % 10 == 0:
+                            log_msg = (
+                                f"epoch {epoch} step {step} loss {loss.item():.4f} [cpu-rnnt] "
+                                f"align(T'U')={align_size} (T'={t_cap}, U={u_cap})"
+                            )
+                            if texts is not None:
+                                def greedy_rnnt_decode_single(feat: torch.Tensor, feat_len: torch.Tensor) -> str:
+                                    model.eval()
+                                    with torch.no_grad():
+                                        feat_b = feat.unsqueeze(0).to(device)
+                                        len_b = feat_len.unsqueeze(0).to(device)
+                                        enc_in = model.frontend(feat_b)
+                                        enc_out = model.encoder(enc_in)
+                                        Tprime = int(enc_out.shape[1])
+                                        hidden = None
+                                        token_cur = torch.zeros(1, dtype=torch.long, device=device)
+                                        hyp_ids = []
+                                        max_total = 128
+                                        total_dec = 0
+                                        for t in range(Tprime):
+                                            u = 0
+                                            while u < 32 and total_dec < max_total:
+                                                pred_step, hidden = model.predictor.forward_streaming(token_cur.unsqueeze(1), hidden)
+                                                logits_tu = model.joiner(enc_out[:, t:t+1, :], pred_step)
+                                                next_id = int(logits_tu[0, 0, 0].argmax().item())
+                                                total_dec += 1
+                                                if next_id == RNNTTrainingConstants.RNNT_BLANK_TOKEN:
+                                                    break
+                                                hyp_ids.append(next_id)
+                                                token_cur = torch.tensor([next_id], dtype=torch.long, device=device)
+                                                u += 1
+                                        hyp = tokenizer.decode(hyp_ids)
+                                    model.train()
+                                    return hyp
+                                hyp_text = greedy_rnnt_decode_single(feats[0].cpu(), feat_lens[0].cpu())
+                                ref_text = tokenizer.normalize(texts[0])
+                                log_msg += f" wer~{wer(ref_text, hyp_text):.3f}"
+                            print(log_msg)
+                        if csv_writer is not None:
+                            csv_writer.writerow([epoch, step, float(loss.item()), t_cap, u_cap, align_size, backend_used, 1])
+                        align_values.append(align_size)
+                        t_caps.append(t_cap)
+                        u_caps.append(u_cap)
+                        backend_use_counts[backend_used] = backend_use_counts.get(backend_used, 0) + 1
+                        continue
+                    except Exception as e2:
+                        print(f"Explicit CPU RNNT w/grad failed ({e2}); will try fast backend or CTC fallback.")
+                # Backward-compatibility notice: --rnnt_cpu_grad is deprecated and no longer forces CPU-grad
+                if args.rnnt_cpu_grad and not args.force_cpu_grad and step == 0:
+                    print("[notice] --rnnt_cpu_grad is deprecated. CPU-grad fallback happens automatically on failures. Use --force_cpu_grad to force CPU-grad for all batches.")
+                if (not args.force_naive_rnnt) and (rnnt_loss is not None) and (rnnt_backend in ("torchaudio", "warp_rnnt")):
                     with record_function("rnnt_loss_compute"):
                         log_probs = logits.log_softmax(dim=-1)
                         try:
@@ -858,12 +954,27 @@ def main():
                                 Ucap = log_probs.shape[2]
                                 t_out_lens = torch.clamp(t_out_lens, max=Tcap)
                                 t_tok_lens = torch.clamp(t_tok_lens, min=0, max=Ucap)
-                                Umax = int(t_tok_lens.max().item()) if t_tok_lens.numel() > 0 else 0
-                                if Umax > 0 and Umax <= Ucap:
-                                    log_probs = log_probs[:, :, :Umax, :]
+                                # Keep T'*U under --max_align by shrinking U across the batch if needed
+                                if args.max_align and args.max_align > 0 and t_out_lens.numel() > 0:
+                                    # Compute per-sample allowed U to satisfy T*U <= max_align
+                                    allowed_Us = []
+                                    for i in range(t_out_lens.numel()):
+                                        Ti_eff_i = int(t_out_lens[i].item())
+                                        Ui_eff_i = int(t_tok_lens[i].item())
+                                        if Ti_eff_i <= 0:
+                                            allowed_Us.append(0)
+                                            continue
+                                        Ui_allowed = min(Ui_eff_i, max(1, int(args.max_align // max(1, Ti_eff_i))))
+                                        allowed_Us.append(Ui_allowed)
+                                    Ubatch = min(allowed_Us) if allowed_Us else 0
+                                    if Ubatch > 0:
+                                        t_tok_lens = torch.clamp(t_tok_lens, max=Ubatch)
+                                        if Ubatch <= Ucap:
+                                            log_probs = log_probs[:, :, :Ubatch, :]
                             loss = rnnt_loss(
                                 log_probs, t_tokens, t_out_lens, t_tok_lens, blank=0, clamp=-1, reduction="mean"
                             )
+                            backend_used = "ta" if rnnt_backend == "torchaudio" else "warp"
                         except Exception as e:
                             # Safe CPU fallback with gradients via manual backward on CPU logits
                             print(f"RNN-T backend failed on-device ({e}); computing RNNT on CPU per-sample with grad mapping.")
@@ -874,6 +985,7 @@ def main():
                                 logits.backward(grad_logits)
                                 optimizer.step()
                                 loss = loss_cpu
+                                backend_used = "cpu_grad"
                                 # Emit periodic logs here since we bypass the standard logger below
                                 if step % 10 == 0:
                                     log_msg = (
@@ -914,6 +1026,13 @@ def main():
                                         ref_text = tokenizer.normalize(texts[0])
                                         log_msg += f" wer~{wer(ref_text, hyp_text):.3f}"
                                     print(log_msg)
+                                # Record CSV metrics for cpu-grad branch before skipping
+                                if csv_writer is not None:
+                                    csv_writer.writerow([epoch, step, float(loss.item()), t_cap, u_cap, align_size, backend_used, 1])
+                                align_values.append(align_size)
+                                t_caps.append(t_cap)
+                                u_caps.append(u_cap)
+                                backend_use_counts[backend_used] = backend_use_counts.get(backend_used, 0) + 1
                                 # Skip standard backward/step and logger below since we've already done them
                                 continue
                             except Exception as e2:
@@ -945,6 +1064,7 @@ def main():
                             flat = torch.cat(targets)
                             tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
                             loss = ctc_loss(logp, flat, out_lens, tgt_lens)
+                            backend_used = "naive"
                     else:
                         # Fallback: CTC on encoder stream only (approx)
                         with record_function("ctc_fallback_compute"):
@@ -957,10 +1077,33 @@ def main():
                             flat = torch.cat(targets)
                             tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
                             loss = ctc_loss(logp, flat, out_lens, tgt_lens)
+                            backend_used = "ctc"
 
+                is_finite = bool(torch.isfinite(loss))
+                if args.skip_non_finite and (not is_finite):
+                    print(f"Skipping non-finite loss at step {step}: {loss.item() if loss.numel()==1 else 'tensor'}")
+                    optimizer.zero_grad(set_to_none=True)
+                    # Log metrics even when skipping the step
+                    if csv_writer is not None:
+                        csv_writer.writerow([epoch, step, float('nan'), t_cap, u_cap, align_size, backend_used, 0])
+                    align_values.append(align_size)
+                    t_caps.append(t_cap)
+                    u_caps.append(u_cap)
+                    backend_use_counts[backend_used] = backend_use_counts.get(backend_used, 0) + 1
+                    continue
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
+                if args.grad_clip and args.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
                 optimizer.step()
+
+                # Persist per-step metrics
+                if csv_writer is not None:
+                    csv_writer.writerow([epoch, step, float(loss.item()), t_cap, u_cap, align_size, backend_used, 1 if is_finite else 0])
+                align_values.append(align_size)
+                t_caps.append(t_cap)
+                u_caps.append(u_cap)
+                backend_use_counts[backend_used] = backend_use_counts.get(backend_used, 0) + 1
 
                 if step % 10 == 0:
                     log_msg = f"epoch {epoch} step {step} loss {loss.item():.4f} align(T'U')={align_size} (T'={t_cap}, U={u_cap})"
@@ -1015,6 +1158,55 @@ def main():
     elapsed = time.time() - start
     if elapsed > 0:
         print(f"encoder throughput ~ {total_frames/elapsed:.1f} frames/sec (dummy)")
+
+    # Summaries for organizational knowledge capture
+    def _percentile(vals: list[int], q: float) -> float:
+        if not vals:
+            return float('nan')
+        s = sorted(vals)
+        k = (len(s) - 1) * q
+        f = math.floor(k)
+        c = math.ceil(k)
+        if f == c:
+            return float(s[int(k)])
+        return float(s[f] + (s[c] - s[f]) * (k - f))
+
+    if align_values:
+        print(f"align stats: count={len(align_values)}, p50={_percentile(align_values,0.5):.0f}, p90={_percentile(align_values,0.9):.0f}, p99={_percentile(align_values,0.99):.0f}, max={max(align_values)}")
+    if t_caps and u_caps:
+        print(f"T' caps: p50={_percentile(t_caps,0.5):.0f}, p90={_percentile(t_caps,0.9):.0f}, max={max(t_caps)}; U caps: p50={_percentile(u_caps,0.5):.0f}, p90={_percentile(u_caps,0.9):.0f}, max={max(u_caps)}")
+    if backend_use_counts:
+        print(f"backend usage: {backend_use_counts}")
+
+    if csv_file_handle is not None:
+        try:
+            csv_file_handle.close()
+        except Exception:
+            pass
+
+    # Save checkpoint if requested (end-of-run)
+    try:
+        import time as _time, os as _os
+        if args.save_ckpt is not None:
+            ckpt_path = args.save_ckpt.strip()
+        else:
+            ckpt_path = ""
+        if not ckpt_path:
+            # Default path under repo checkpoints/
+            default_dir = _os.path.join(_os.path.dirname(__file__), "checkpoints")
+            _os.makedirs(default_dir, exist_ok=True)
+            ckpt_path = _os.path.join(default_dir, f"rnnt_{int(_time.time())}.pt")
+        else:
+            _os.makedirs(_os.path.dirname(ckpt_path), exist_ok=True)
+        torch.save({
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "backend": rnnt_backend,
+            "args": vars(args),
+        }, ckpt_path)
+        print(f"Saved checkpoint to {ckpt_path}")
+    except Exception as _e:
+        print(f"Checkpoint save skipped/failed: {_e}")
 
     # Optional post-training evaluation with greedy decode for quick WER signal
     if args.eval_after and HAS_LS and args.manifest:

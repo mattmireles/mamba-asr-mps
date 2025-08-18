@@ -28,7 +28,14 @@ Phase 3 Integration:
 - Input: Optimized MCT models from scripts/optimize.py
 - Processing: PyTorch to Core ML conversion with ANE optimization
 - Output: .mlpackage files ready for iOS/macOS deployment
-- Validation: ANE execution verification and performance benchmarking
+
+Swift Runtime Integration:
+- MambaASRRunner: Swift CLI for validating exported Core ML models with CTC beam search
+- Production apps: Integration points for iOS/macOS speech recognition with vocabulary support
+- Performance validation: Apple Silicon inference benchmarking with latency CSV export
+- Model deployment: Ready-to-use .mlpackage/.mlmodelc for app bundles
+- Validation: ANE execution verification with streaming inference and transcript generation
+- Decoding algorithms: Support for both greedy and beam search decoding modes
 
 Conversion Pipeline:
 1. Model preparation: Load optimized PyTorch MCT model
@@ -74,6 +81,8 @@ References:
 from __future__ import annotations
 
 import argparse
+import os
+os.environ.setdefault("MAMBA_DISABLE_RECORD_FUNCTION", "1")
 import torch
 import torch.nn as nn
 
@@ -303,8 +312,26 @@ if __name__ == "__main__":
     if not HAS_CT:
         print("coremltools not installed; export is a no-op. Install coremltools to proceed.")
     else:
-        # For now, create a fresh model instance as a placeholder
         from modules.mct.mct_model import MCTModel, MCTConfig  # type: ignore
-        cfg = MCTConfig()
-        model = MCTModel(cfg)
+        model: nn.Module
+        if args.model:
+            try:
+                ckpt = torch.load(args.model, map_location="cpu")
+                cfg_kwargs = ckpt.get("config", {})
+                if not isinstance(cfg_kwargs, dict):
+                    cfg_kwargs = {}
+                cfg = MCTConfig(**cfg_kwargs)
+                model = MCTModel(cfg)
+                if "model_state" in ckpt:
+                    model.load_state_dict(ckpt["model_state"], strict=False)
+                else:
+                    print("Warning: checkpoint missing 'model_state'; exporting untrained init model.")
+            except Exception as e:
+                print(f"Failed to load checkpoint {args.model} ({e}); exporting fresh model.")
+                cfg = MCTConfig()
+                model = MCTModel(cfg)
+        else:
+            cfg = MCTConfig()
+            model = MCTModel(cfg)
+        model.eval()
         export_to_coreml(model, output_path=args.output, chunk_length=args.chunk_length)

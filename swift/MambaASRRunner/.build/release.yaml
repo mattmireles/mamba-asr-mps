@@ -1,0 +1,66 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "MambaASRRunner-arm64-apple-macosx15.0-release.exe": ["<MambaASRRunner-arm64-apple-macosx15.0-release.exe>"]
+  "MambaASRRunner-arm64-apple-macosx15.0-release.module": ["<MambaASRRunner-arm64-apple-macosx15.0-release.module>"]
+  "PackageStructure": ["<PackageStructure>"]
+  "main": ["<MambaASRRunner-arm64-apple-macosx15.0-release.exe>","<MambaASRRunner-arm64-apple-macosx15.0-release.module>"]
+  "test": ["<MambaASRRunner-arm64-apple-macosx15.0-release.exe>","<MambaASRRunner-arm64-apple-macosx15.0-release.module>"]
+default: "main"
+nodes:
+  "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/Sources/MambaASRRunner/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+commands:
+  "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/Sources/MambaASRRunner/main.swift"]
+    outputs: ["/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/sources"]
+    description: "Write auxiliary file /Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/sources"
+
+  "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.product/Objects.LinkFileList":
+    tool: write-auxiliary-file
+    inputs: ["<link-file-list>","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/main.swift.o"]
+    outputs: ["/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.product/Objects.LinkFileList"]
+    description: "Write auxiliary file /Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.product/Objects.LinkFileList"
+
+  "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"]
+    outputs: ["/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
+
+  "<MambaASRRunner-arm64-apple-macosx15.0-release.exe>":
+    tool: phony
+    inputs: ["/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner"]
+    outputs: ["<MambaASRRunner-arm64-apple-macosx15.0-release.exe>"]
+
+  "<MambaASRRunner-arm64-apple-macosx15.0-release.module>":
+    tool: phony
+    inputs: ["/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/main.swift.o","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/Modules/MambaASRRunner.swiftmodule"]
+    outputs: ["<MambaASRRunner-arm64-apple-macosx15.0-release.module>"]
+
+  "C.MambaASRRunner-arm64-apple-macosx15.0-release.exe":
+    tool: shell
+    inputs: ["/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/main.swift.o","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.product/Objects.LinkFileList"]
+    outputs: ["/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner"]
+    description: "Linking ./.build/arm64-apple-macosx/release/MambaASRRunner"
+    args: ["/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc","-L","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release","-o","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner","-module-name","MambaASRRunner","-Xlinker","-no_warn_duplicate_libraries","-emit-executable","-Xlinker","-dead_strip","-Xlinker","-alias","-Xlinker","_MambaASRRunner_main","-Xlinker","_main","-Xlinker","-rpath","-Xlinker","@loader_path","@/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.product/Objects.LinkFileList","-target","arm64-apple-macosx13.0","-sdk","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks","-I","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-L","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-g"]
+
+  "C.MambaASRRunner-arm64-apple-macosx15.0-release.module":
+    tool: shell
+    inputs: ["/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/Sources/MambaASRRunner/main.swift","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/sources"]
+    outputs: ["/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/main.swift.o","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/Modules/MambaASRRunner.swiftmodule"]
+    description: "Compiling Swift Module 'MambaASRRunner' (1 sources)"
+    args: ["/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc","-module-name","MambaASRRunner","-emit-dependencies","-emit-module","-emit-module-path","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/Modules/MambaASRRunner.swiftmodule","-output-file-map","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/output-file-map.json","-whole-module-optimization","-num-threads","24","-c","@/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner.build/sources","-I","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/Modules","-target","arm64-apple-macosx13.0","-O","-j24","-DSWIFT_PACKAGE","-module-cache-path","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/ModuleCache","-parseable-output","-Xfrontend","-entry-point-function-name","-Xfrontend","MambaASRRunner_main","-swift-version","5","-sdk","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks","-I","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-L","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-g","-Xcc","-isysroot","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk","-Xcc","-F","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-Xcc","-F","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks","-Xcc","-fPIC","-Xcc","-g","-package-name","mambaasrrunner"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/Sources/MambaASRRunner/","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/Package.swift","/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+
