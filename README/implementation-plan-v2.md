@@ -267,3 +267,15 @@ Note: The quick probe trace confirms active MPSGraph execution. For CPU-op enume
     - rnnt_mps_native_60_align40k.csv: mean_loss≈333.7, mean_align≈4781.8, mean_Tcap≈139.0, mean_Ucap≈34.5 (n=4)
     - rnnt_ctc_60.csv: mean_loss≈11.0, mean_Tcap≈120.2, mean_Ucap≈30.8 (n=4) [encoder-only CTC fallback]
     - rnnt_naive_20.csv: naive small-T,U sanity run (T'=64, U=16) throughput ~406 fps
+  - Longer mps_native run: wrote `exports/rnnt_mps_native_180.summary.json` (encoder_fps≈1098), confirming sustained throughput over 180 steps.
+  - Core ML trace export: saved `exports/CoreMLTraces/fp16_w8_analysis.trace` and TOC; CLI row extraction for per-op CPU list is limited. Next session: enumerate CPU ops via Instruments UI and update the remediation table with exact op names.
+  - RNNT benchmark harness: added `scripts/bench_rnnt_impls.py` and generated `exports/bench_rnnt_summary.md`:
+    
+    ```
+    | impl       | fps   | align_p50 | align_p90 | backend_usage                                  |
+    |------------|------:|----------:|----------:|-----------------------------------------------|
+    | mps_native | 819.5 |    4206.0 |    4881.6 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 0, 'cpu_grad': 4, 'unknown': 0} |
+    | auto       | 1130.4|    4662.0 |    5472.0 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 0, 'cpu_grad': 4, 'unknown': 0} |
+    | cpu_grad   | 1124.6|    3870.0 |    4721.2 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 0, 'cpu_grad': 4, 'unknown': 0} |
+    | ctc        | 1193.5|    3620.0 |    4541.4 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 4, 'cpu_grad': 0, 'unknown': 0} |
+    ```
