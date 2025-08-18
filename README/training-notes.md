@@ -23,7 +23,27 @@ These notes capture concrete issues, fixes, and heuristics discovered while trai
   - We implemented `_rnnt_loss_cpu_with_grad`: copy logits to CPU with `requires_grad_(True)`, compute per-sample RNNT loss, `backward()` on CPU to get logits.grad, then backprop into the MPS graph via `logits.backward(grad_logits)`.
   - This path is robust when torchaudio rejects batched shapes; it keeps training moving at the expense of throughput.
 
+- mps_native facade (today)
+  - Default RNNT backend is now `mps_native` (auto-select best backend with robust CPU-grad fallback).
+  - Added dynamic U-capping in the facade: slices LogProb U-dimension and clamps token lengths using `RNNT_MAX_ALIGN` (CLI `--rnnt_max_align`).
+  - Added `--adaptive_ctc_after_cpu_grad N` to automatically switch remaining batches to encoder-CTC after N consecutive `cpu_grad` RNNT batches (stability over speed).
+  - Added summary logging with `--log_json` to capture encoder fps, T'/U distributions, and backend mix at end of run.
+
+- selective_scan (today)
+  - Extended benchmark to 8192 tokens on MPS shows stable/high throughput with mild variance; naive scan is not a bottleneck for short/medium chunks. Metal kernel de-prioritized.
+  - Scripted report generator publishes `exports/bench_selective_scan.md` for archival.
+
 #### Concrete runs (latest)
+##### Quick synthetic RNNT micro-benchmarks (sanity, bs=2)
+- 60-step comparison (exports/*.csv & *.summary.json):
+  - mps_native: ~1413 fps (mix of `ta`/`cpu_grad`, often `cpu_grad` dominant)
+  - auto: ~1209 fps (100% `cpu_grad` observed in these short runs)
+  - force_cpu_grad: ~1252 fps (100% `cpu_grad` by design)
+  - ctc: ~1193 fps (encoder-only approximation)
+- Longer mps_native run (180 steps): encoder_fps≈1098; summary saved to `exports/rnnt_mps_native_180.summary.json`.
+
+##### selective_scan benchmarks
+- Extended table up to 8192 tokens published at `exports/bench_selective_scan.md`; naive loop acceptable for our operating sequence lengths on MPS.
 - Extended run (torchaudio backend; bs=2; 512 samples; 400 steps)
   - Loss: 4.46 → ~2.86 by ~step 190, then NaNs after ~200
   - Throughput: ~1584 fps (encoder)
@@ -61,10 +81,12 @@ These notes capture concrete issues, fixes, and heuristics discovered while trai
 - Cap T'·U via `--max_align` and shrink U across the batch when necessary.
 - Enable `--skip_non_finite` and `--grad_clip` for long runs; do not crash the epoch.
 - Keep a CPU-grad RNNT path available; it is essential to maintain progress when the fast path rejects shapes.
+- Use `--adaptive_ctc_after_cpu_grad` to pivot to CTC when torchaudio repeatedly forces CPU-grad, to stabilize throughput on long runs.
 
 #### Instrumentation
 - Log `align(T'U')` per batch along with loss.
 - Periodic greedy RNN-T decode for a rough WER signal using streaming predictor and joiner (fast, approximate).
+- `--log_json` persists summary telemetry (fps, T'/U stats, backend usage) for dashboards.
 
 #### Next actions
 - Tighten alignment cap further (e.g., 50–60k) and make per-sample U-capping the default in fast path.
@@ -77,6 +99,15 @@ These notes capture concrete issues, fixes, and heuristics discovered while trai
   - KD short pass (dev-clean slice): avg_loss≈2.8510; encoder throughput≈2563.2 fps
   - QAT short pass: last_loss≈0.0; encoder throughput≈2942.4 fps (fake-quant; deprecation suggests torchao PT2E migration)
   - Structured pruning short pass: last_loss≈0.0; encoder throughput≈2474.1 fps
+
+- Core ML analysis (planned)
+  - Artifacts captured: `exports/CoreMLTraces/quick_probe.trace`, `fp16_w8_analysis.trace` (+ TOC XMLs). CLI export of per-op CPU list is limited; enumerate CPU ops in Instruments UI (Operations view → Location=CPU) and copy into plan remediation table.
+
+##### One-liners (bench harness)
+```bash
+python Mamba-ASR-MPS/scripts/bench_rnnt_impls.py
+cat Mamba-ASR-MPS/exports/bench_rnnt_summary.md
+```
 
 #### Core ML streaming latency (Swift runner)
 - Command:
