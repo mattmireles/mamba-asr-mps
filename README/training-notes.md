@@ -88,6 +88,14 @@ These notes capture concrete issues, fixes, and heuristics discovered while trai
 - Periodic greedy RNN-T decode for a rough WER signal using streaming predictor and joiner (fast, approximate).
 - `--log_json` persists summary telemetry (fps, T'/U stats, backend usage) for dashboards.
 
+##### Core ML trace notes (today)
+- CLI exports captured under `exports/CoreMLTraces/`:
+  - `quick_probe_toc.xml`, `fp16_w8_analysis_toc.xml`
+  - `os_signpost_coreml.xml` (schema only, no rows exported)
+  - `mps_hw_intervals.xml`, `ane_hw_intervals.xml`
+- Observation: `xcrun xctrace export` did not yield per-op rows for `coreml-os-signpost` on this setup. Instruments UI is required to enumerate CPU-bound ops (Core ML → Operations → sort by Location).
+- Action: Open `fp16_w8_analysis.trace` in Instruments and list CPU ops to update the remediation table in `implementation-plan-v2.md`.
+
 #### Next actions
 - Tighten alignment cap further (e.g., 50–60k) and make per-sample U-capping the default in fast path.
 - Attempt `warp_rnnt` install with `--no-build-isolation`; evaluate stability vs. torchaudio on Apple Silicon.

@@ -232,6 +232,14 @@ Note: The quick probe trace confirms active MPSGraph execution. For CPU-op enume
 | group_norm | Fold into adjacent conv/linear during export or replace with instance norm where equivalent |
 | einsum (complex patterns) | Expand into explicit matmul/transpose/batchmm sequences supported on MPS |
 
+Trace artifacts (CLI exports captured for reference):
+- `exports/CoreMLTraces/quick_probe_toc.xml`
+- `exports/CoreMLTraces/fp16_w8_analysis_toc.xml`
+- `exports/CoreMLTraces/os_signpost_coreml.xml` (schema only; no rows via CLI)
+- `exports/CoreMLTraces/mps_hw_intervals.xml`, `exports/CoreMLTraces/ane_hw_intervals.xml`
+
+Note: `xcrun xctrace export` produced empty row sets for `coreml-os-signpost` on this machine; per Apple tooling, per-operation CPU/GPU/ANE locations must be read from the Instruments UI (Core ML → Operations view). We will enumerate exact CPU-bound ops in UI and update the table accordingly.
+
 
 ## Implementation Progress (write your notes below)
 
@@ -281,3 +289,8 @@ Note: The quick probe trace confirms active MPSGraph execution. For CPU-op enume
     ```
   - selective_scan report generator: added `scripts/bench_selective_scan_report.py` and published `exports/bench_selective_scan.md` (extended summary captured for archival).
   - Phase 2 baselines helper: added `scripts/run_phase2_baselines.sh` to run 60-step sanity passes across mps_native/auto/cpu_grad/ctc and emit CSV/JSON under `exports/`.
+
+- 2025-08-18: Core ML trace parsing (CLI) pass
+  - Exported TOCs and schema for Core ML signposts from `quick_probe.trace` and `fp16_w8_analysis.trace`.
+  - `coreml-os-signpost` row queries returned empty via CLI; captured `os_signpost_coreml.xml` (schema) and MPS/ANE interval XMLs.
+  - Next: Open `exports/CoreMLTraces/fp16_w8_analysis.trace` in Instruments, Core ML → Operations, sort by Location=CPU, and enumerate op types to replace the provisional remediation table above with exact entries.
