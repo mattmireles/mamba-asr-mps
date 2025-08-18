@@ -64,6 +64,11 @@ import Foundation
 import CoreML
 import Accelerate
 import AVFoundation
+import os
+
+// For efficiency, create a static signposter instance for a given subsystem and category.
+// Using .pointsOfInterest makes them visible by default in the Points of Interest instrument.
+private let mlSignposter = OSSignposter(subsystem: "com.mamba.asr", category: .pointsOfInterest)
 
 // AMX global wrapper so it is visible where needed
 func ctcBeamUpdateAMXGlobal(
@@ -470,15 +475,27 @@ private enum MambaASRConstants {
 /// - Compilation: One-time cost amortized across multiple inference calls
 /// - ANE preparation: Additional ~50-100ms for Neural Engine optimization
 func loadMLModel(at path: String) throws -> MLModel {
+    let signpostID = mlSignposter.makeSignpostID()
+    let loadState = mlSignposter.beginInterval("LoadAndCompileModel", id: signpostID, "Path: \(path)")
+
+    let t0 = CFAbsoluteTimeGetCurrent()
     let modelURL = URL(fileURLWithPath: path)
     let compiledURL = try MLModel.compileModel(at: modelURL)
+    let t1 = CFAbsoluteTimeGetCurrent()
     
     let configuration = MLModelConfiguration()
     // Enable all compute units for optimal Apple Silicon performance
     // ANE (Neural Engine) > GPU (Metal) > CPU priority ordering
     configuration.computeUnits = .all
     
-    return try MLModel(contentsOf: compiledURL, configuration: configuration)
+    let model = try MLModel(contentsOf: compiledURL, configuration: configuration)
+    let t2 = CFAbsoluteTimeGetCurrent()
+    let compileMs = (t1 - t0) * 1000.0
+    let instantiateMs = (t2 - t1) * 1000.0
+    let totalMs = (t2 - t0) * 1000.0
+    print(String(format: "CoreML: model loaded (computeUnits=.all) | compile_ms=%.2f instantiate_ms=%.2f total_ms=%.2f", compileMs, instantiateMs, totalMs))
+    mlSignposter.endInterval("LoadAndCompileModel", loadState)
+    return model
 }
 
 // MARK: - Speech Recognition Decoding Algorithms
@@ -1158,7 +1175,12 @@ func runOnce(model: MLModel) throws {
     
     // Execute Core ML inference with synthetic inputs
     // This validates the complete model pipeline on Apple Silicon
+    print("CoreML: prediction start")
+    let signpostID = mlSignposter.makeSignpostID()
+    let inferenceState = mlSignposter.beginInterval("SinglePrediction", id: signpostID)
     let inferenceOutput = try model.prediction(from: MLDictionaryFeatureProvider(dictionary: modelInputs))
+    mlSignposter.endInterval("SinglePrediction", inferenceState)
+    print("CoreML: prediction end")
     
     // Validate expected output tensors are present and accessible
     // Missing outputs indicate model export or interface configuration errors
@@ -1258,7 +1280,16 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
             MambaASRConstants.hiddenInputName: hiddenInput
         ]
         let t0 = CFAbsoluteTimeGetCurrent()
+        print("CoreML: prediction start")
+
+        let signpostID = mlSignposter.makeSignpostID()
+        let predictionState = mlSignposter.beginInterval("StreamingPrediction", id: signpostID, "Chunk: \(chunkId)")
+
         let out = try model.prediction(from: MLDictionaryFeatureProvider(dictionary: inputs))
+
+        mlSignposter.endInterval("StreamingPrediction", predictionState)
+
+        print("CoreML: prediction end")
         let t1 = CFAbsoluteTimeGetCurrent()
         let ms = (t1 - t0) * 1000.0
         latenciesMs.append(ms)
