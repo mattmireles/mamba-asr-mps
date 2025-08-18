@@ -20,23 +20,18 @@ import torch
 
 def select_best_backend():
     """Return (fn, name) for the best-available RNNT backend.
-    - torchaudio.prototype.rnnt.rnnt_loss or torchaudio.functional.rnnt_loss
-    - warp_rnnt.rnnt_loss
-    - None if unavailable
+    Preference order:
+    - torchaudio.prototype.rnnt.rnnt_loss (preferred; functional is deprecated)
+    - warp_rnnt.rnnt_loss (if installed)
+    - None
     """
-    # Try torchaudio prototype
+    # Prefer torchaudio prototype
     try:
         from torchaudio.prototype.rnnt import rnnt_loss as ta_rnnt_loss  # type: ignore
         return ta_rnnt_loss, "torchaudio"
     except Exception:
         pass
-    # Try torchaudio functional (wider availability)
-    try:
-        from torchaudio.functional import rnnt_loss as ta_fn  # type: ignore
-        return ta_fn, "torchaudio"
-    except Exception:
-        pass
-    # Try warp_rnnt
+    # Fallback: warp_rnnt if available
     try:
         from warp_rnnt import rnnt_loss as warp_rnnt_loss  # type: ignore
         return warp_rnnt_loss, "warp_rnnt"
@@ -107,12 +102,7 @@ def rnnt_loss_mps(logits: torch.Tensor, tokens_with_blank: torch.Tensor, out_len
                 is_torchaudio = True
         except Exception:
             pass
-        try:
-            from torchaudio.functional import rnnt_loss as _ta_fn  # type: ignore
-            if rnnt_fn is _ta_fn:
-                is_torchaudio = True
-        except Exception:
-            pass
+        # Only support prototype moving forward (functional is deprecated in 2.9)
 
         lp = logits.log_softmax(dim=-1)
         Tcap = lp.shape[1]
