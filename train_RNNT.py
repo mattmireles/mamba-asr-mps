@@ -766,6 +766,7 @@ def main():
     parser.add_argument("--grad_clip", type=float, default=0.0, help="Clip global grad-norm to this value (0 disables)")
     parser.add_argument("--skip_non_finite", action="store_true", help="Skip optimizer step when loss is non-finite (nan/inf)")
     parser.add_argument("--log_csv", type=str, default="", help="Optional path to write per-step metrics CSV (step, loss, t_cap, u_cap, align, backend, finite)")
+    parser.add_argument("--log_json", type=str, default="", help="Optional path to write summary metrics JSON at end of run")
     parser.add_argument("--save_ckpt", type=str, default="", help="Optional path to save a checkpoint at the end of training (.pt)")
     args = parser.parse_args()
 
@@ -1196,8 +1197,9 @@ def main():
                 torch.mps.synchronize()
 
     elapsed = time.time() - start
+    encoder_fps = total_frames/elapsed if elapsed > 0 else float('nan')
     if elapsed > 0:
-        print(f"encoder throughput ~ {total_frames/elapsed:.1f} frames/sec (dummy)")
+        print(f"encoder throughput ~ {encoder_fps:.1f} frames/sec (dummy)")
 
     # Summaries for organizational knowledge capture
     def _percentile(vals: list[int], q: float) -> float:
@@ -1217,6 +1219,34 @@ def main():
         print(f"T' caps: p50={_percentile(t_caps,0.5):.0f}, p90={_percentile(t_caps,0.9):.0f}, max={max(t_caps)}; U caps: p50={_percentile(u_caps,0.5):.0f}, p90={_percentile(u_caps,0.9):.0f}, max={max(u_caps)}")
     if backend_use_counts:
         print(f"backend usage: {backend_use_counts}")
+
+    # Optional summary JSON
+    if args.log_json:
+        try:
+            import json as _json
+            import os as _os
+            summary = {
+                "encoder_fps": float(encoder_fps),
+                "align_count": len(align_values),
+                "align_p50": _percentile(align_values, 0.5) if align_values else None,
+                "align_p90": _percentile(align_values, 0.9) if align_values else None,
+                "align_p99": _percentile(align_values, 0.99) if align_values else None,
+                "align_max": max(align_values) if align_values else None,
+                "Tcap_p50": _percentile(t_caps, 0.5) if t_caps else None,
+                "Tcap_p90": _percentile(t_caps, 0.9) if t_caps else None,
+                "Tcap_max": max(t_caps) if t_caps else None,
+                "Ucap_p50": _percentile(u_caps, 0.5) if u_caps else None,
+                "Ucap_p90": _percentile(u_caps, 0.9) if u_caps else None,
+                "Ucap_max": max(u_caps) if u_caps else None,
+                "backend_usage": backend_use_counts,
+                "args": vars(args),
+            }
+            _os.makedirs(_os.path.dirname(args.log_json), exist_ok=True)
+            with open(args.log_json, "w") as _fh:
+                _json.dump(summary, _fh, indent=2)
+            print(f"wrote summary JSON: {args.log_json}")
+        except Exception as _e:
+            print(f"failed to write summary JSON: {_e}")
 
     if csv_file_handle is not None:
         try:
