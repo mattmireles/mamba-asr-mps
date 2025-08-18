@@ -50,6 +50,12 @@ References:
 from .Conmamba import ConMambaCTC, ConMambaCTCConfig
 from .mct.mct_model import MCTModel, MCTConfig
 
+# Optional RNNT MPS-native loss facade
+try:  # pragma: no cover
+    from .rnnt_loss_mps import rnnt_loss_mps  # type: ignore
+except Exception:
+    rnnt_loss_mps = None  # type: ignore
+
 # Export all public APIs
 __all__ = [
     'ConMambaCTC',

@@ -752,12 +752,13 @@ def main():
     parser.add_argument("--profile", action="store_true", help="Enable MPS profiler context where available")
     parser.add_argument("--manifest", type=str, default="", help="Path to LibriSpeech CSV manifest for RNNT training")
     parser.add_argument("--force_naive_rnnt", action="store_true", help="Force small T',U for naive RNNT loss path")
-    parser.add_argument("--rnnt_impl", type=str, default="auto", choices=["auto", "torchaudio", "warp_rnnt", "naive", "ctc"], help="Select RNN-T loss implementation")
+    parser.add_argument("--rnnt_impl", type=str, default="auto", choices=["auto", "torchaudio", "warp_rnnt", "naive", "ctc", "mps_native"], help="Select RNN-T loss implementation")
     parser.add_argument("--max_align", type=int, default=60000, help="Maximum allowed T'*U alignment size before clamping/fallback (default tightened based on LibriSpeech T'·U distributions)")
     parser.add_argument("--max_samples", type=int, default=0, help="Limit number of samples from manifest for a short pass (0 = all)")
     parser.add_argument("--max_steps", type=int, default=0, help="Limit number of optimizer steps for a short pass (0 = full epoch)")
     parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
     parser.add_argument("--device", type=str, default="auto", choices=["auto","cpu","mps","cuda"], help="Force device override for RNNT experiments")
+    parser.add_argument("--rnnt_max_align", type=int, default=60000, help="Max allowed T'*U before shrinking U (also available via RNNT_MAX_ALIGN env)")
     parser.add_argument("--rnnt_cpu_grad", action="store_true", help="Deprecated: CPU-grad fallback is always enabled automatically when fast backend fails. Use --force_cpu_grad to force CPU-grad for all batches.")
     parser.add_argument("--force_cpu_grad", action="store_true", help="Force CPU per-sample RNNT with gradient mapping for all batches (stability baseline)")
     parser.add_argument("--eval_after", action="store_true", help="Run a small greedy-decode evaluation after training to report avg WER")
@@ -769,6 +770,11 @@ def main():
     args = parser.parse_args()
 
     device = get_device() if args.device == "auto" else torch.device(args.device)
+    # Propagate alignment cap to RNNT facade via env
+    try:
+        os.environ["RNNT_MAX_ALIGN"] = str(int(args.rnnt_max_align))
+    except Exception:
+        pass
     print(f"Using device: {device}")
 
     # Tokenizer and vocab
@@ -792,7 +798,16 @@ def main():
         dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
 
     # Select RNNT loss backend
-    rnnt_loss, rnnt_backend = select_rnnt_backend(args.rnnt_impl)
+    rnnt_loss, rnnt_backend = select_rnnt_backend(args.rnnt_impl if args.rnnt_impl != "mps_native" else "auto")
+    # If mps_native is requested, wrap with MPS-native facade
+    rnnt_mps_facade = None
+    if args.rnnt_impl == "mps_native":
+        try:
+            from modules.rnnt_loss_mps import rnnt_loss_mps  # type: ignore
+            rnnt_mps_facade = rnnt_loss_mps
+            print("Using RNN-T loss facade: mps_native (auto + CPU-grad fallback)")
+        except Exception as _e:
+            print(f"mps_native not available ({_e}); falling back to auto backend selection.")
     if rnnt_backend == "torchaudio":
         print("Using RNN-T loss backend: torchaudio.prototype.rnnt.rnnt_loss")
     elif rnnt_backend == "warp_rnnt":
@@ -927,7 +942,32 @@ def main():
                 # Backward-compatibility notice: --rnnt_cpu_grad is deprecated and no longer forces CPU-grad
                 if args.rnnt_cpu_grad and not args.force_cpu_grad and step == 0:
                     print("[notice] --rnnt_cpu_grad is deprecated. CPU-grad fallback happens automatically on failures. Use --force_cpu_grad to force CPU-grad for all batches.")
-                if (not args.force_naive_rnnt) and (rnnt_loss is not None) and (rnnt_backend in ("torchaudio", "warp_rnnt")):
+                # mps_native facade path
+                if rnnt_mps_facade is not None:
+                    with record_function("rnnt_loss_mps_native"):
+                        try:
+                            loss_or, grad_logits, which = rnnt_mps_facade(logits, tokens, out_lens, token_lens, blank=0)
+                            backend_used = which if which != "torchaudio" else "ta"
+                            if grad_logits is not None:
+                                optimizer.zero_grad(set_to_none=True)
+                                logits.backward(grad_logits)
+                                optimizer.step()
+                                loss = loss_or
+                                # Log periodically for CPU-grad branch
+                                if step % 10 == 0:
+                                    print(f"epoch {epoch} step {step} loss {loss.item():.4f} [mps_native:{backend_used}] align(T'U')={align_size} (T'={t_cap}, U={u_cap})")
+                                if csv_writer is not None:
+                                    csv_writer.writerow([epoch, step, float(loss.item()), t_cap, u_cap, align_size, backend_used, 1])
+                                align_values.append(align_size)
+                                t_caps.append(t_cap)
+                                u_caps.append(u_cap)
+                                backend_use_counts[backend_used] = backend_use_counts.get(backend_used, 0) + 1
+                                continue
+                            else:
+                                loss = loss_or
+                        except Exception as e:
+                            print(f"mps_native facade failed ({e}); will try fast backend or CTC fallback.")
+                elif (not args.force_naive_rnnt) and (rnnt_loss is not None) and (rnnt_backend in ("torchaudio", "warp_rnnt")):
                     with record_function("rnnt_loss_compute"):
                         log_probs = logits.log_softmax(dim=-1)
                         try:

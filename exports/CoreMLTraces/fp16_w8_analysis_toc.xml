@@ -1,0 +1,134 @@
+<?xml version="1.0"?>
+
+<trace-toc>
+    <run number="1">
+        <info>
+            <target>
+                <device uuid="6D507AC3-C4FA-5F1D-84AA-66C9BCB03EE1" model="Mac Studio" name="☀️ M2 Ultra Studio" os-version="15.6 (24G84)" platform="macOS"/>
+                <process arguments="--mlmodelc /Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/exports/Compiled_fp16_w8/MambaASR_fp16_w8.mlmodelc --mlpackage /Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/exports/MambaASR_fp16_w8.mlpackage --stream --duration 60 --warmup 2 --wav /Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/exports/tts_real_long_16k.wav --compute all" type="launched" return-exit-status="0" name="MambaASRRunner" pid="16902" termination-reason="exit(0)"/>
+            </target>
+            <summary>
+                <start-date>2025-08-18T10:12:26.739-07:00</start-date>
+                <end-date>2025-08-18T10:12:28.348-07:00</end-date>
+                <duration>1.609393</duration>
+                <end-reason>Target app exited</end-reason>
+                <instruments-version>16.0 (16F6)</instruments-version>
+                <template-name>Core ML</template-name>
+                <recording-mode>Deferred</recording-mode>
+                <time-limit>30 seconds</time-limit>
+                <intruments-recording-settings>
+                    <instrument name="Metal Application">
+                        <array>
+                            <dictionary>
+                                <key name="GPU">
+                                    <value>Counter Set: (null)</value>
+                                    <value>Shader Timeline: Disabled</value>
+                                    <value>Induced GPU Performance State: Default</value>
+                                </key>
+                            </dictionary>
+                        </array>
+                    </instrument>
+                </intruments-recording-settings>
+            </summary>
+        </info>
+        <processes>
+            <process name="Cursor Helper (GPU)" pid="88248" path="/Applications/Cursor.app/Contents/Frameworks/Cursor Helper (GPU).app"/>
+            <process name="kernel.release.t6020" pid="0" path="/System/Library/Kernels/kernel.release.t6020"/>
+            <process name="MambaASRRunner" pid="16902" path="/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner"/>
+            <process name="WindowServer" pid="502" path="/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer"/>
+        </processes>
+        <data>
+            <table codes="&quot;0x85,0x3&quot; &quot;0x85,0x90&quot; &quot;0x85,0xA9&quot;" schema="kdebug"/>
+            <table codes="&quot;0x85,0x80&quot;" schema="kdebug"/>
+            <table codes="&quot;0x07,0x00&quot; &quot;0x1f,0x05&quot;" schema="kdebug" target="SINGLE"/>
+            <table codes="&quot;0x2b,0xd8&quot;" schema="kdebug" target="SINGLE"/>
+            <table codes="&quot;0x85,0x12&quot;" schema="kdebug"/>
+            <table codes="&quot;0x1f,0x7&quot;" schema="kdebug" target="SINGLE"/>
+            <table codes="&quot;0x2b,0xdc&quot;" schema="kdebug" target="SINGLE"/>
+            <table codes="&quot;0x31,0xca&quot;" schema="kdebug" target="SINGLE"/>
+            <table codes="&quot;0x2d,*&quot;" schema="kdebug" callstack="user" target="SINGLE"/>
+            <table codes="&quot;0x07,0x00&quot;" schema="kdebug" target="SINGLE"/>
+            <table codes="&quot;0x1,0x25&quot;" schema="kdebug" target="SINGLE"/>
+            <table codes="&quot;0x2b,0x87&quot;" schema="kdebug" target="SINGLE"/>
+            <table codes="&quot;0x85,0x92&quot; &quot;0x85,0x93&quot; &quot;0x85,0xae&quot; &quot;0x06,0x1b&quot; &quot;0x2b,0x24&quot;" schema="kdebug"/>
+            <table codes="&quot;0x2b,0x2b&quot;" schema="kdebug"/>
+            <table codes="&quot;0x34,0x11&quot; &quot;0x34,0x0f&quot;" schema="kdebug"/>
+            <table codes="&quot;0x85,0xc2&quot;" schema="kdebug"/>
+            <table codes="&quot;0x85,0x9&quot; &quot;0x85,0x18&quot;" schema="kdebug" callstack="user"/>
+            <table codes="&quot;0x85,0x2&quot;" schema="kdebug" callstack="user"/>
+            <table codes="&quot;0x85,0x92&quot; &quot;0x85,0x93&quot; &quot;0x85,0xae&quot;" schema="kdebug"/>
+            <table codes="&quot;0x85,0x30&quot;" schema="kdebug" callstack="user"/>
+            <table codes="&quot;0x2b,0x23&quot; &quot;0x2b,0x26&quot; &quot;0x14,0x11&quot; &quot;0x06,0x1b&quot; &quot;0x85,0x1&quot; &quot;0x85,0x8&quot; &quot;0x85,0x18&quot;" schema="kdebug"/>
+            <table codes="&quot;0x06,0x1b&quot; &quot;0x2b,0x24&quot;" schema="kdebug-strings"/>
+            <table schema="metal-application-encoders-list" target-pid="SINGLE"/>
+            <table schema="ca-client-present-request"/>
+            <table codes="&quot;0x1f,0x05&quot;" schema="kdebug-strings" target="SINGLE"/>
+            <table codes="&quot;0x85,0x1&quot; &quot;0x85,0x2&quot; &quot;0x85,0x8&quot; &quot;0x85,0x30&quot; &quot;0x85,0xc0&quot; &quot;0x85,0xc1&quot; &quot;0x31,0xca&quot;" schema="kdebug-strings"/>
+            <table schema="metal-shader-profiler-intervals" target-pid="SINGLE"/>
+            <table codes="&quot;0x85,0x1&quot; &quot;0x85,0x8&quot;" schema="kdebug" callstack="user"/>
+            <table codes="&quot;0x85,0xc0&quot; &quot;0x85,0xc1&quot; &quot;0x31,0xca&quot;" schema="kdebug"/>
+            <table schema="metal-driver-event-per-thread-intervals" target-pid="SINGLE"/>
+            <table schema="metal-object-label"/>
+            <table callstack="user" target="SINGLE" schema="time-sample" sample-rate-micro-seconds="1000" all-thread-states="NO"/>
+            <table schema="metal-gpu-execution-points"/>
+            <table schema="ane-hw-intervals-internal"/>
+            <table schema="metal-gpu-info"/>
+            <table schema="dyld-library-load" target-pid="SINGLE"/>
+            <table track-id-base="2000" schema="metal-object-dependency-chain-gpu"/>
+            <table schema="process-info"/>
+            <table schema="metal-visual-highlight-chain-gpu"/>
+            <table schema="ca-client-presented-handler"/>
+            <table schema="metal-driver-intervals" target-pid="SINGLE"/>
+            <table schema="time-info"/>
+            <table schema="coreml-os-signpost" target-pid="SINGLE"/>
+            <table schema="graphics-compiler-activity-intervals" target-pid="SINGLE"/>
+            <table schema="metal-application-command-buffer-submissions" target-pid="SINGLE"/>
+            <table shader-profiler="0" counter-profile="0" schema="gpu-counter-info" counter-device="0"/>
+            <table requested-consistent-state="0" schema="gpu-performance-state-info"/>
+            <table schema="gpu-shader-profiler-sample"/>
+            <table schema="metal-command-buffer-completed"/>
+            <table subsystem="&quot;com.apple.Metal.AGXSignposts&quot;" schema="os-signpost-arg" category="ShaderTimeline"/>
+            <table schema="metal-application-intervals" target-pid="SINGLE"/>
+            <table content="metal-connection-chains" schema="visual-chain" target-pid="SINGLE"/>
+            <table requested-consistent-state="0" schema="gpu-performance-state-intervals"/>
+            <table schema="gpu-aps-stream"/>
+            <table schema="metal-driver-event-intervals" target-pid="SINGLE"/>
+            <table schema="metal-visual-highlight-chain-app"/>
+            <table schema="metal-shader-profiler-shader-list" target-pid="SINGLE"/>
+            <table content="metal-connections" schema="visual-connection" target-pid="SINGLE"/>
+            <table schema="gpu-shader-profiler-interval"/>
+            <table schema="thread-info"/>
+            <table schema="tick" frequency="1"/>
+            <table schema="tick" frequency="10"/>
+            <table schema="life-cycle-period" target-pid="SINGLE"/>
+            <table target-pid="SINGLE" context-switch-sampling="0" high-frequency-sampling="0" schema="time-profile" needs-kernel-callstack="0" record-waiting-threads="0"/>
+            <table track-id-base="1000" schema="metal-object-dependency-chain-app"/>
+            <table subsystem="&quot;com.apple.coreanimation&quot;" schema="os-signpost" category="&quot;CAMetalLayer.Stalls&quot;"/>
+            <table subsystem="&quot;com.apple.coreanimation&quot;" schema="os-signpost" category="CAMetalLayer"/>
+            <table subsystem="&quot;com.apple.coreml&quot;" schema="os-signpost" category="DynamicTracing"/>
+            <table subsystem="&quot;com.apple.coreml&quot;" schema="os-signpost" category="coreml"/>
+            <table schema="device-gpu-info"/>
+            <table subsystem="&quot;com.apple.ConditionInducer.LowSeverity&quot;" schema="os-signpost" category="InduceCondition"/>
+            <table subsystem="&quot;com.apple.Metal.AGXSignposts&quot;" schema="os-signpost" category="ShaderTimeline"/>
+            <table schema="mps-hw-intervals" target-pid="SINGLE"/>
+            <table schema="metal-gpu-state-intervals"/>
+            <table schema="ca-client-buffer-wait-interval"/>
+            <table requested-consistent-state="0" schema="gpu-performance-device-state-intervals"/>
+            <table shader-profiler="0" counter-profile="0" schema="metal-gpu-counter-profile" counter-device="0"/>
+            <table schema="gpu-counter-value"/>
+            <table track-id-base="2000" schema="metal-object-dependency-chain-driver"/>
+            <table schema="metal-io-surface-access"/>
+            <table schema="metal-command-buffer-error"/>
+            <table schema="metal-application-event-interval" target-pid="SINGLE"/>
+            <table schema="metal-gpu-counter-intervals"/>
+            <table schema="metal-gpu-submission-to-command-buffer-id"/>
+            <table schema="metal-known-compositor-process"/>
+            <table schema="metal-gpu-intervals" target-pid="SINGLE"/>
+            <table schema="metal-command-buffer-frame-assignment"/>
+            <table schema="metal-visual-highlight-chain-driver"/>
+            <table schema="metal-command-buffer-to-accelerator-id"/>
+            <table codes="&quot;0x06,0x1b&quot; &quot;0x2b,0x24&quot;" schema="kdebug"/>
+        </data>
+        <tracks/>
+    </run>
+</trace-toc>
