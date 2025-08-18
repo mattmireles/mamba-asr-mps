@@ -214,7 +214,7 @@ After determining that Xcode 16's Instruments tooling is unreliable for both Cor
 | Model compile        | ~tbd (printed as compile_ms) |
 | Model instantiate    | ~tbd (printed as instantiate_ms) |
 | Model load total     | ~tbd (printed as total_ms) |
-| Single Prediction    | ~13–16 per 256-frame chunk (runner) |
+| Single Prediction    | ~20.5 avg per 256-frame chunk (runner) |
 
 This data is now our source of truth for evaluating any future optimizations to the model export process or the inference graph.
 
@@ -231,6 +231,20 @@ swift build -c release -Xswiftc -O
   --stream --duration 10 --warmup 2 \
   --wav Mamba-ASR-MPS/exports/tts_real_long_16k.wav \
   --latency-csv Mamba-ASR-MPS/exports/CoreMLTraces/latency_probe.csv
+```
+
+Latest streaming latency summary:
+
+```text
+## Streaming latency summary
+
+| metric | ms |
+|---|---:|
+| count | 8 |
+| avg | 20.496 |
+| p50 | 19.973 |
+| p90 | 24.063 |
+| p99 | 24.088 |
 ```
 
 ## Implementation Progress (write your notes below)
