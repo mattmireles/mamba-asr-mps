@@ -947,7 +947,7 @@ def main():
                 if rnnt_mps_facade is not None:
                     with record_function("rnnt_loss_mps_native"):
                         try:
-                            loss_or, grad_logits, which = rnnt_mps_facade(logits, tokens, out_lens, token_lens, blank=0)
+                            loss_or, grad_logits, which = rnnt_mps_facade(logits, tokens, out_lens, token_lens, blank=0, max_align=args.rnnt_max_align)
                             backend_used = which if which != "torchaudio" else "ta"
                             if grad_logits is not None:
                                 optimizer.zero_grad(set_to_none=True)

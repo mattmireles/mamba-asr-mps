@@ -86,7 +86,7 @@ def _cpu_grad_fallback(rnnt_fn, logits: torch.Tensor, tokens_with_blank: torch.T
     return total.to(logits.device).detach(), grad_logits.detach()
 
 
-def rnnt_loss_mps(logits: torch.Tensor, tokens_with_blank: torch.Tensor, out_lens: torch.Tensor, token_lens_with_blank: torch.Tensor, blank: int = 0) -> Tuple[torch.Tensor, Optional[torch.Tensor], str]:
+def rnnt_loss_mps(logits: torch.Tensor, tokens_with_blank: torch.Tensor, out_lens: torch.Tensor, token_lens_with_blank: torch.Tensor, blank: int = 0, max_align: Optional[int] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor], str]:
     """
     Compute RNN-T loss with preference for MPS execution; fall back to CPU-grad.
 
@@ -119,7 +119,7 @@ def rnnt_loss_mps(logits: torch.Tensor, tokens_with_blank: torch.Tensor, out_len
         Ucap = lp.shape[2]
         # Guard: keep effective T*U manageable by shrinking U batch-wide if needed
         # Uses a conservative cap similar to training default
-        MAX_ALIGN = int(os.environ.get("RNNT_MAX_ALIGN", "60000"))
+        MAX_ALIGN = int(max_align) if (max_align is not None) else int(os.environ.get("RNNT_MAX_ALIGN", "60000"))
         # Compute per-sample allowed U to satisfy T*U <= MAX_ALIGN
         allowed_Us = []
         for i in range(out_lens.numel()):
