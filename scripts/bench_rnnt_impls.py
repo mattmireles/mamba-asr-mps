@@ -52,6 +52,12 @@ def main():
             'align_p90': summary.get('align_p90'),
             'backend_usage': summary.get('backend_usage'),
         }
+    def _fmt(x):
+        try:
+            return f"{float(x):.1f}"
+        except Exception:
+            return "-"
+
     md = [
         f"# RNNT Bench Summary ({datetime.now().isoformat(timespec='seconds')})",
         '',
@@ -63,7 +69,7 @@ def main():
     for name in CASES:
         impl = name[0]
         r = results.get(impl, {})
-        md.append(f"| {impl} | {r.get('encoder_fps'):.1f} | {r.get('align_p50')} | {r.get('align_p90')} | {r.get('backend_usage')} |")
+        md.append(f"| {impl} | {_fmt(r.get('encoder_fps'))} | {_fmt(r.get('align_p50'))} | {_fmt(r.get('align_p90'))} | {r.get('backend_usage')} |")
     out_path = EXPORTS / 'bench_rnnt_summary.md'
     out_path.write_text('\n'.join(md))
     print(f"wrote {out_path}")
