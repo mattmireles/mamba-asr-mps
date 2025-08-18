@@ -95,6 +95,19 @@ These notes capture concrete issues, fixes, and heuristics discovered while trai
   - `mps_hw_intervals.xml`, `ane_hw_intervals.xml`
 - Observation: `xcrun xctrace export` did not yield per-op rows for `coreml-os-signpost` on this setup. Instruments UI is required to enumerate CPU-bound ops (Core ML → Operations → sort by Location).
 - Action: Open `fp16_w8_analysis.trace` in Instruments and list CPU ops to update the remediation table in `implementation-plan-v2.md`.
+- Helper scripts:
+  - CSV → remediation table:
+    ```bash
+    python Mamba-ASR-MPS/scripts/coreml_ops_remediation.py \
+      --csv Mamba-ASR-MPS/exports/CoreMLTraces/operations.csv \
+      --out Mamba-ASR-MPS/exports/CoreMLTraces/coreml_cpu_ops.md
+    ```
+  - MPS intervals summary:
+    ```bash
+    python Mamba-ASR-MPS/scripts/summarize_mps_intervals.py \
+      --xml Mamba-ASR-MPS/exports/CoreMLTraces/mps_hw_intervals.xml \
+      --out Mamba-ASR-MPS/exports/CoreMLTraces/mps_intervals_summary.md
+    ```
 
 #### Next actions
 - Tighten alignment cap further (e.g., 50–60k) and make per-sample U-capping the default in fast path.
