@@ -280,3 +280,4 @@ Note: The quick probe trace confirms active MPSGraph execution. For CPU-op enume
     | ctc        | 1193.5|    3620.0 |    4541.4 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 4, 'cpu_grad': 0, 'unknown': 0} |
     ```
   - selective_scan report generator: added `scripts/bench_selective_scan_report.py` and published `exports/bench_selective_scan.md` (extended summary captured for archival).
+  - Phase 2 baselines helper: added `scripts/run_phase2_baselines.sh` to run 60-step sanity passes across mps_native/auto/cpu_grad/ctc and emit CSV/JSON under `exports/`.
