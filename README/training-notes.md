@@ -87,6 +87,8 @@ These notes capture concrete issues, fixes, and heuristics discovered while trai
 - Log `align(T'U')` per batch along with loss.
 - Periodic greedy RNN-T decode for a rough WER signal using streaming predictor and joiner (fast, approximate).
 - `--log_json` persists summary telemetry (fps, T'/U stats, backend usage) for dashboards.
+ - Runner now logs model load timings: `compile_ms`, `instantiate_ms`, `total_ms`.
+ - Added CSV summarizer: `scripts/summarize_latency_csv.py` → writes `exports/CoreMLTraces/latency_summary.md` with count/avg/p50/p90/p99.
 
 ##### Core ML trace notes (today)
 - CLI exports captured under `exports/CoreMLTraces/`:
@@ -113,6 +115,7 @@ These notes capture concrete issues, fixes, and heuristics discovered while trai
 - Tighten alignment cap further (e.g., 50–60k) and make per-sample U-capping the default in fast path.
 - Attempt `warp_rnnt` install with `--no-build-isolation`; evaluate stability vs. torchaudio on Apple Silicon.
 - Run a longer CPU-grad baseline epoch to capture a clean loss trajectory (stability over speed) to finalize Phase 2 baseline.
+ - Fold manual timing into CI: run runner, collect `latency_probe.csv`, summarize to markdown, and attach to plan automatically.
 - Begin collecting stable checkpoints for Phase 3 KD/QAT/pruning experiments.
   - Update: Added end-of-run checkpoint writer in `train_RNNT.py` via `--save_ckpt` (defaults to `Mamba-ASR-MPS/checkpoints/rnnt_<ts>.pt`).
   - Update: Deprecated `--rnnt_cpu_grad`; introduced `--force_cpu_grad` (forces CPU-grad every batch). Automatic CPU-grad fallback still occurs when fast backend fails.
