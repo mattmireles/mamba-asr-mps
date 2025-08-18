@@ -65,6 +65,120 @@ import CoreML
 import Accelerate
 import AVFoundation
 
+// AMX global wrapper so it is visible where needed
+func ctcBeamUpdateAMXGlobal(
+    beams: [CTCBeamEntry],
+    frameLogProbs: [Float],
+    beamWidth: Int,
+    blankId: Int,
+    topKOverride: Int?,
+    blankGateMargin: Float?
+) -> [CTCBeamEntry] {
+    let cap = frameLogProbs.count
+    let base = max(beamWidth * 3, 10)
+    let topCount = min((topKOverride != nil && topKOverride! > 0) ? topKOverride! : base, cap)
+
+    // Top-K indices by iterative max
+    var mutableProbs = frameLogProbs
+    var topIndices: [Int] = []
+    topIndices.reserveCapacity(topCount)
+    for _ in 0..<topCount {
+        var bestIdx = 0
+        var bestVal = -Float.greatestFiniteMagnitude
+        for i in 0..<mutableProbs.count {
+            let v = mutableProbs[i]
+            if v > bestVal { bestVal = v; bestIdx = i }
+        }
+        topIndices.append(bestIdx)
+        mutableProbs[bestIdx] = -Float.greatestFiniteMagnitude
+    }
+
+    // Optional blank gating
+    var blankOnly = false
+    if let margin = blankGateMargin, margin > 0 {
+        let lpBlank = frameLogProbs[blankId]
+        var bestNonBlank = -Float.greatestFiniteMagnitude
+        for idx in topIndices where idx != blankId {
+            let v = frameLogProbs[idx]
+            if v > bestNonBlank { bestNonBlank = v }
+        }
+        if lpBlank >= bestNonBlank + margin { blankOnly = true }
+    }
+
+    var next: [CTCBeamEntry] = []
+    next.reserveCapacity(beams.count * topCount)
+    // Map hashed token sequence -> index in next for O(1) merges (best-effort; resolves rare collisions by fallback compare)
+    var nextIndexByHash: [UInt64: Int] = [:]
+    nextIndexByHash.reserveCapacity(beams.count * topCount)
+    @inline(__always)
+    func hashTokens(_ toks: [Int]) -> UInt64 {
+        var h: UInt64 = 1469598103934665603 // FNV-1a 64-bit offset
+        for t in toks {
+            h ^= UInt64(bitPattern: Int64(t & 0xffff_ffff))
+            h &*= 1099511628211
+        }
+        // Mix length to reduce collisions for common prefixes
+        h ^= UInt64(toks.count)
+        h &*= 1099511628211
+        return h
+    }
+    @inline(__always)
+    func mergeIntoNext(tokens: [Int], addBlank: Float?, addNonBlank: Float?) {
+        let key = hashTokens(tokens)
+        if let idx = nextIndexByHash[key] {
+            // Verify match (rare collisions)
+            if next[idx].tokens == tokens {
+                var e = next[idx]
+                if let aB = addBlank { e.pBlank = logSumExpF(e.pBlank, aB) }
+                if let aNB = addNonBlank { e.pNonBlank = logSumExpF(e.pNonBlank, aNB) }
+                next[idx] = e
+                return
+            } else if let found = next.firstIndex(where: { $0.tokens == tokens }) {
+                var e = next[found]
+                if let aB = addBlank { e.pBlank = logSumExpF(e.pBlank, aB) }
+                if let aNB = addNonBlank { e.pNonBlank = logSumExpF(e.pNonBlank, aNB) }
+                next[found] = e
+                return
+            }
+        }
+        next.append(CTCBeamEntry(tokens: tokens,
+                                 pBlank: addBlank ?? -Float.infinity,
+                                 pNonBlank: addNonBlank ?? -Float.infinity))
+        nextIndexByHash[key] = next.count - 1
+    }
+
+    // Preallocate reusable buffers
+    var topVals = [Float](repeating: -Float.greatestFiniteMagnitude, count: topCount)
+    var candVals = [Float](repeating: 0, count: topCount)
+    for beam in beams {
+        let beamScore = logSumExpF(beam.pBlank, beam.pNonBlank)
+        // Fill topVals from frame
+        for (j, idx) in topIndices.enumerated() { topVals[j] = frameLogProbs[idx] }
+        // Vector add once
+        vDSP.add(beamScore, topVals, result: &candVals)
+        // Expand
+        for (j, c) in topIndices.enumerated() {
+            if blankOnly && c != blankId { continue }
+            let add = candVals[j]
+            if c == blankId {
+                mergeIntoNext(tokens: beam.tokens, addBlank: add, addNonBlank: nil)
+            } else {
+                var newToks = beam.tokens
+                let last = beam.tokens.last
+                if last == c {
+                    let addRepeat = beam.pBlank + topVals[j]
+                    mergeIntoNext(tokens: newToks, addBlank: nil, addNonBlank: addRepeat)
+                } else {
+                    newToks.append(c)
+                    mergeIntoNext(tokens: newToks, addBlank: nil, addNonBlank: add)
+                }
+            }
+        }
+    }
+    let pruned = next.sorted { $0.score > $1.score }
+    return Array(pruned.prefix(min(beamWidth, pruned.count)))
+}
+
 // MARK: - vDSP Mel Spectrogram (minimal, CPU)
 
 /// Generate a simple synthetic mono waveform (sum of sines) for testing.
@@ -123,45 +237,41 @@ private func computeLogMelSpectrogram(signal: [Float], sampleRate: Int, nFFT: In
 
     var real = [Float](repeating: 0, count: nFFT/2)
     var imag = [Float](repeating: 0, count: nFFT/2)
-    var split = DSPSplitComplex(realp: &real, imagp: &imag)
     var frameBuffer = [Float](repeating: 0, count: nFFT)
 
-    for t in 0..<numFrames {
-        let start = t * hopLength
-        if start + winLength > signal.count { break }
-        // Windowed frame into frameBuffer
-        for i in 0..<winLength {
-            frameBuffer[i] = signal[start + i] * window[i]
-        }
-        if winLength < nFFT {
-            for i in winLength..<nFFT { frameBuffer[i] = 0 }
-        }
-        // Real-to-complex FFT
-        frameBuffer.withUnsafeMutableBufferPointer { buf in
-            buf.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: nFFT/2) { _ in }
-        }
-        frameBuffer.withUnsafeBytes { raw -> Void in
-            let ptr = raw.bindMemory(to: Float.self).baseAddress!
-            ptr.withMemoryRebound(to: DSPComplex.self, capacity: nFFT/2) { complexPtr in
-                // Pack real input into split form
-                vDSP_ctoz(complexPtr, 2, &split, 1, vDSP_Length(nFFT/2))
+    real.withUnsafeMutableBufferPointer { rbuf in
+        imag.withUnsafeMutableBufferPointer { ibuf in
+            var split = DSPSplitComplex(realp: rbuf.baseAddress!, imagp: ibuf.baseAddress!)
+            for t in 0..<numFrames {
+                let start = t * hopLength
+                if start + winLength > signal.count { break }
+                // Windowed frame into frameBuffer
+                for i in 0..<winLength { frameBuffer[i] = signal[start + i] * window[i] }
+                if winLength < nFFT { for i in winLength..<nFFT { frameBuffer[i] = 0 } }
+                // Real-to-complex FFT
+                frameBuffer.withUnsafeBytes { raw -> Void in
+                    let ptr = raw.bindMemory(to: Float.self).baseAddress!
+                    ptr.withMemoryRebound(to: DSPComplex.self, capacity: nFFT/2) { complexPtr in
+                        vDSP_ctoz(complexPtr, 2, &split, 1, vDSP_Length(nFFT/2))
+                    }
+                }
+                fft.forward(input: split, output: &split)
+                // Power spectrum (first fftBins)
+                var power = [Float](repeating: 0, count: fftBins)
+                power[0] = rbuf[0] * rbuf[0]
+                for k in 1..<(fftBins) {
+                    let r = rbuf[k - 1]
+                    let im = ibuf[k - 1]
+                    power[k] = r*r + im*im
+                }
+                // Multiply by mel filterbank
+                for m in 0..<numMels {
+                    var acc: Float = 0
+                    let rowOffset = m * fftBins
+                    vDSP_dotpr(power, 1, Array(fb[rowOffset..<(rowOffset+fftBins)]), 1, &acc, vDSP_Length(fftBins))
+                    melFeatures[t * numMels + m] = log(max(acc, 1e-6))
+                }
             }
-        }
-        fft.forward(input: split, output: &split)
-        // Power spectrum (first fftBins)
-        var power = [Float](repeating: 0, count: fftBins)
-        power[0] = real[0] * real[0] // DC
-        for k in 1..<(fftBins) {
-            let r = real[k - 1]
-            let im = imag[k - 1]
-            power[k] = r*r + im*im
-        }
-        // Multiply by mel filterbank: mel[numMels] = fb[numMels x fftBins] * power[fftBins]
-        for m in 0..<numMels {
-            var acc: Float = 0
-            let rowOffset = m * fftBins
-            vDSP_dotpr(power, 1, Array(fb[rowOffset..<(rowOffset+fftBins)]), 1, &acc, vDSP_Length(fftBins))
-            melFeatures[t * numMels + m] = log(max(acc, 1e-6))
         }
     }
     return melFeatures
@@ -592,6 +702,14 @@ private func logSumExp(_ a: Double, _ b: Double) -> Double {
     return m + log(exp(a - m) + exp(b - m))
 }
 
+/// Float32 variant of log-sum-exp for AMX-friendly vector math.
+private func logSumExpF(_ a: Float, _ b: Float) -> Float {
+    if !a.isFinite { return b }
+    if !b.isFinite { return a }
+    let m = max(a, b)
+    return m + logf(expf(a - m) + expf(b - m))
+}
+
 /// Computes numerically stable log-softmax transformation for CTC decoding.
 ///
 /// This function converts raw model logits to normalized log-probabilities
@@ -628,7 +746,7 @@ private func logSumExp(_ a: Double, _ b: Double) -> Double {
 /// - Monotonicity: Preserves relative ordering of input logits
 /// - Stability: Robust across wide input value ranges
 /// - Efficiency: O(n) time complexity with single pass algorithm
-private func logSoftmax(_ logits: [Float]) -> [Double] {
+private func logSoftmax(_ logits: [Float]) -> [Float] {
     // Accelerate-based fast path: compute exp using vForce and sums via vDSP
     let n = logits.count
     if n == 0 { return [] }
@@ -645,9 +763,10 @@ private func logSoftmax(_ logits: [Float]) -> [Double] {
     }
     var sumExp = vDSP.sum(expVals)
     if sumExp <= 0 { sumExp = 1e-30 }
-    let logZ = log(Double(sumExp))
-    var out = [Double](repeating: 0, count: n)
-    for i in 0..<n { out[i] = Double(shifted[i]) - logZ }
+    let logZ = logf(sumExp)
+    var out = [Float](repeating: 0, count: n)
+    // out = shifted - logZ
+    vDSP.add(-logZ, shifted, result: &out)
     return out
 }
 
@@ -674,7 +793,7 @@ private func logSoftmax(_ logits: [Float]) -> [Double] {
 /// - Probability tracking: Maintains exact CTC forward probabilities
 /// - Path merging: Enables proper combination of equivalent sequences
 /// - Numerical stability: Log-domain computation throughout
-private struct CTCBeamEntry {
+struct CTCBeamEntry {
     
     /// Current partial token sequence for this beam path.
     /// Accumulated through CTC decoding without blanks or consecutive duplicates.
@@ -684,18 +803,18 @@ private struct CTCBeamEntry {
     /// Log probability of this sequence ending with a blank token.
     /// Essential for CTC probability calculation and proper state transitions.
     /// Used to determine valid next token emission probabilities.
-    var pBlank: Double
+    var pBlank: Float
     
     /// Log probability of this sequence ending with a non-blank token.
     /// Combines with pBlank for total sequence probability calculation.
     /// Critical for distinguishing repeated token emission from continuation.
-    var pNonBlank: Double
+    var pNonBlank: Float
     
     /// Combined log probability score for beam ranking and pruning.
     /// Computed via numerically stable log-sum-exp of blank and non-blank paths.
     /// Primary metric for beam selection and final transcript generation.
-    var score: Double { 
-        logSumExp(pBlank, pNonBlank) 
+    var score: Float { 
+        logSumExpF(pBlank, pNonBlank) 
     }
 }
 
@@ -748,63 +867,187 @@ private struct CTCBeamEntry {
 /// - Space: O(B × T) where T=average token sequence length
 /// - Memory: Optimized for mobile constraints with pruning strategies
 /// - Real-time: Suitable for streaming inference on Apple Silicon
-private func ctcBeamUpdate(beams: [CTCBeamEntry], frameLogProbs: [Double], beamWidth: Int, blankId: Int) -> [CTCBeamEntry] {
-    // Limit token expansions to top-N per frame for speed (N = max(beamWidth*3, 10))
-    let topCount = max(beamWidth * 3, 10)
-    // Get top indices by log-prob
-    let indexed = frameLogProbs.enumerated().sorted { $0.element > $1.element }
-    let top = Array(indexed.prefix(min(topCount, frameLogProbs.count)))
+    private func ctcBeamUpdate(
+    beams: [CTCBeamEntry],
+    frameLogProbs: [Float],
+    beamWidth: Int,
+    blankId: Int,
+    topKOverride: Int?,
+    blankGateMargin: Float?
+) -> [CTCBeamEntry] {
+    // Limit token expansions to top-N per frame for speed.
+    // If topKOverride is set (>0), use it; otherwise N = max(beamWidth*3, 10)
+    let cap = frameLogProbs.count
+    let base = max(beamWidth * 3, 10)
+    let topCount = min((topKOverride != nil && topKOverride! > 0) ? topKOverride! : base, cap)
 
-    var nextMap: [String: CTCBeamEntry] = [:]
+    // Compute top-K indices by iterative max (O(V*K), fast for small K)
+    var mutableProbs = frameLogProbs
+    var topIndices: [Int] = []
+    topIndices.reserveCapacity(topCount)
+    for _ in 0..<topCount {
+        var bestIdx = 0
+        var bestVal = -Float.greatestFiniteMagnitude
+        for i in 0..<mutableProbs.count {
+            let v = mutableProbs[i]
+            if v > bestVal { bestVal = v; bestIdx = i }
+        }
+        topIndices.append(bestIdx)
+        mutableProbs[bestIdx] = -Float.greatestFiniteMagnitude
+    }
 
-    func keyFor(_ toks: [Int]) -> String {
-        return toks.map { String($0) }.joined(separator: ",")
+    // AMX-friendly variant leveraging vDSP for vector math on candidate expansions.
+    func ctcBeamUpdateAMX(
+        beams: [CTCBeamEntry],
+        frameLogProbs: [Float],
+        beamWidth: Int,
+        blankId: Int,
+        topKOverride: Int?,
+        blankGateMargin: Float?
+    ) -> [CTCBeamEntry] {
+        let cap = frameLogProbs.count
+        let base = max(beamWidth * 3, 10)
+        let topCount = min((topKOverride != nil && topKOverride! > 0) ? topKOverride! : base, cap)
+
+        // Find top-K indices (iterative max) — scalar but fast for small K
+        var mutableProbs = frameLogProbs
+        var topIndices: [Int] = []
+        topIndices.reserveCapacity(topCount)
+        for _ in 0..<topCount {
+            var bestIdx = 0
+            var bestVal = -Float.greatestFiniteMagnitude
+            for i in 0..<mutableProbs.count {
+                let v = mutableProbs[i]
+                if v > bestVal { bestVal = v; bestIdx = i }
+            }
+            topIndices.append(bestIdx)
+            mutableProbs[bestIdx] = -Float.greatestFiniteMagnitude
+        }
+
+        // Optional blank gating
+        var blankOnly = false
+        if let margin = blankGateMargin, margin > 0 {
+            let lpBlank = frameLogProbs[blankId]
+            var bestNonBlank = -Float.greatestFiniteMagnitude
+            for idx in topIndices where idx != blankId {
+                let v = frameLogProbs[idx]
+                if v > bestNonBlank { bestNonBlank = v }
+            }
+            if lpBlank >= bestNonBlank + margin { blankOnly = true }
+        }
+
+        var next: [CTCBeamEntry] = []
+        next.reserveCapacity(beams.count * topCount)
+
+        @inline(__always)
+        func mergeIntoNext(tokens: [Int], addBlank: Float?, addNonBlank: Float?) {
+            if let idx = next.firstIndex(where: { $0.tokens == tokens }) {
+                var e = next[idx]
+                if let aB = addBlank { e.pBlank = logSumExpF(e.pBlank, aB) }
+                if let aNB = addNonBlank { e.pNonBlank = logSumExpF(e.pNonBlank, aNB) }
+                next[idx] = e
+            } else {
+                next.append(CTCBeamEntry(tokens: tokens,
+                                         pBlank: addBlank ?? -Float.infinity,
+                                         pNonBlank: addNonBlank ?? -Float.infinity))
+            }
+        }
+
+        // Vectorized per-beam candidate accumulation
+        for beam in beams {
+            let beamScore = logSumExpF(beam.pBlank, beam.pNonBlank)
+
+            // Gather top-K log-probs into a buffer
+            var topVals = [Float](repeating: -Float.greatestFiniteMagnitude, count: topCount)
+            for (j, idx) in topIndices.enumerated() { topVals[j] = frameLogProbs[idx] }
+            // Add beamScore to all candidates in one shot: candVals = topVals + beamScore
+            var candVals = [Float](repeating: 0, count: topCount)
+            vDSP.add(beamScore, topVals, result: &candVals)
+
+            for (j, c) in topIndices.enumerated() {
+                if blankOnly && c != blankId { continue }
+                let add = candVals[j]
+                if c == blankId {
+                    mergeIntoNext(tokens: beam.tokens, addBlank: add, addNonBlank: nil)
+                } else {
+                    var newToks = beam.tokens
+                    let last = beam.tokens.last
+                    if last == c {
+                        // Only from blank in repeat case
+                        let addRepeat = beam.pBlank + topVals[j]
+                        mergeIntoNext(tokens: newToks, addBlank: nil, addNonBlank: addRepeat)
+                    } else {
+                        newToks.append(c)
+                        mergeIntoNext(tokens: newToks, addBlank: nil, addNonBlank: add)
+                    }
+                }
+            }
+        }
+
+        let pruned = next.sorted { $0.score > $1.score }
+        return Array(pruned.prefix(min(beamWidth, pruned.count)))
+    }
+
+    // Optional blank gating: if blank log-prob beats best non-blank by margin, skip non-blank expansions
+    var blankOnly = false
+    if let margin = blankGateMargin, margin > 0 {
+        let lpBlank = frameLogProbs[blankId]
+        var bestNonBlank = -Float.greatestFiniteMagnitude
+        for idx in topIndices where idx != blankId {
+            let v = frameLogProbs[idx]
+            if v > bestNonBlank { bestNonBlank = v }
+        }
+        if lpBlank >= bestNonBlank + margin {
+            blankOnly = true
+        }
+    }
+
+    // Merge without hash maps; small-K linear merge for speed and less alloc
+    var next: [CTCBeamEntry] = []
+    next.reserveCapacity(beams.count * topCount)
+
+    @inline(__always)
+    func mergeIntoNext(tokens: [Int], addBlank: Float?, addNonBlank: Float?) {
+        if let idx = next.firstIndex(where: { $0.tokens == tokens }) {
+            var e = next[idx]
+            if let aB = addBlank { e.pBlank = logSumExpF(e.pBlank, aB) }
+            if let aNB = addNonBlank { e.pNonBlank = logSumExpF(e.pNonBlank, aNB) }
+            next[idx] = e
+        } else {
+            next.append(CTCBeamEntry(tokens: tokens,
+                                     pBlank: addBlank ?? -Float.infinity,
+                                     pNonBlank: addNonBlank ?? -Float.infinity))
+        }
     }
 
     for beam in beams {
-        for (c, lp) in top { // c is token id, lp is log-prob
+        let beamScore = logSumExpF(beam.pBlank, beam.pNonBlank)
+        for c in topIndices {
+            if blankOnly && c != blankId { continue }
+            let lp = frameLogProbs[c]
             if c == blankId {
                 // Stay on same prefix, accumulate to pBlank'
-                let newKey = keyFor(beam.tokens)
-                let add = logSumExp(beam.pBlank, beam.pNonBlank) + lp
-                if var existed = nextMap[newKey] {
-                    existed.pBlank = logSumExp(existed.pBlank, add)
-                    nextMap[newKey] = existed
-                } else {
-                    nextMap[newKey] = CTCBeamEntry(tokens: beam.tokens, pBlank: add, pNonBlank: -Double.infinity)
-                }
+                let add = beamScore + lp
+                mergeIntoNext(tokens: beam.tokens, addBlank: add, addNonBlank: nil)
             } else {
                 var newToks = beam.tokens
                 let last = beam.tokens.last
                 if last == c {
                     // Repeating token: only extend from blank
                     let add = beam.pBlank + lp
-                    let newKey = keyFor(newToks)
-                    if var existed = nextMap[newKey] {
-                        existed.pNonBlank = logSumExp(existed.pNonBlank, add)
-                        nextMap[newKey] = existed
-                    } else {
-                        nextMap[newKey] = CTCBeamEntry(tokens: newToks, pBlank: -Double.infinity, pNonBlank: add)
-                    }
+                    mergeIntoNext(tokens: newToks, addBlank: nil, addNonBlank: add)
                 } else {
                     // New token appended: from both blank and non-blank
                     newToks.append(c)
-                    let add = logSumExp(beam.pBlank, beam.pNonBlank) + lp
-                    let newKey = keyFor(newToks)
-                    if var existed = nextMap[newKey] {
-                        existed.pNonBlank = logSumExp(existed.pNonBlank, add)
-                        nextMap[newKey] = existed
-                    } else {
-                        nextMap[newKey] = CTCBeamEntry(tokens: newToks, pBlank: -Double.infinity, pNonBlank: add)
-                    }
+                    let add = beamScore + lp
+                    mergeIntoNext(tokens: newToks, addBlank: nil, addNonBlank: add)
                 }
             }
         }
     }
 
     // Prune to top beamWidth by score
-    let merged = Array(nextMap.values)
-    let pruned = merged.sorted { $0.score > $1.score }
+    let pruned = next.sorted { $0.score > $1.score }
     return Array(pruned.prefix(min(beamWidth, pruned.count)))
 }
 
@@ -935,7 +1178,9 @@ func runOnce(model: MLModel) throws {
 }
 
 /// Streaming loop over real mel features from a WAV file or synthetic fallback.
-private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int, warmupCount: Int, latencyCsvPath: String?) throws {
+private struct StreamingStats { let avgMs: Double; let p50Ms: Double; let p90Ms: Double; let count: Int }
+
+private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int, warmupCount: Int, latencyCsvPath: String?) throws -> StreamingStats {
     // Parameters consistent with runOnce
     let sampleRate = 16000
     let hop = 160
@@ -987,7 +1232,7 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
     var collectedIds: [Int] = []
     // Initialize CTC beam state if enabled via --beam
     let useBeam = (beamWidth > 1)
-    var beams: [CTCBeamEntry] = [CTCBeamEntry(tokens: [], pBlank: 0.0, pNonBlank: -Double.infinity)]
+    var beams: [CTCBeamEntry] = [CTCBeamEntry(tokens: [], pBlank: 0.0, pNonBlank: -Float.infinity)]
     while frameIndex + Tchunk <= totalFrames {
         if durationSeconds > 0 {
             let elapsed = Date().timeIntervalSince(startTime)
@@ -1000,6 +1245,7 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
         let slice = Array(signal[startSample..<endSample])
         let mel = computeLogMelSpectrogram(signal: slice, sampleRate: sampleRate, nFFT: nfft, winLength: win, hopLength: hop, numMels: numMels, numFrames: Tchunk)
         let audioChunk = try MLMultiArray(shape: [1, NSNumber(value: Tchunk), NSNumber(value: numMels)], dataType: MambaASRConstants.audioDataType)
+        // Copy mel into MLMultiArray via safe indexed writes
         for t in 0..<Tchunk {
             for m in 0..<numMels {
                 let idx = t * numMels + m
@@ -1029,13 +1275,31 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
             var frame = [Float]()
             frame.reserveCapacity(V)
             for t in 0..<Tprime {
-                // Extract frame logits
+                // Extract frame logits (safe access)
                 frame.removeAll(keepingCapacity: true)
                 let base = t * V
                 for v in 0..<V { frame.append(logits[base + v].floatValue) }
                 if useBeam {
                     let lps = logSoftmax(frame)
-                    beams = ctcBeamUpdate(beams: beams, frameLogProbs: lps, beamWidth: beamWidth, blankId: MambaASRConstants.blankTokenIndex)
+                    if useAMXBeam {
+                        beams = ctcBeamUpdateAMXGlobal(
+                            beams: beams,
+                            frameLogProbs: lps,
+                            beamWidth: beamWidth,
+                            blankId: MambaASRConstants.blankTokenIndex,
+                            topKOverride: topKPerFrame,
+                            blankGateMargin: blankGateMargin
+                        )
+                    } else {
+                        beams = ctcBeamUpdate(
+                            beams: beams,
+                            frameLogProbs: lps,
+                            beamWidth: beamWidth,
+                            blankId: MambaASRConstants.blankTokenIndex,
+                            topKOverride: topKPerFrame,
+                            blankGateMargin: blankGateMargin
+                        )
+                    }
                 } else {
                     // Greedy per-frame argmax for CTC-like collapse later
                     var bestId = 0
@@ -1063,19 +1327,25 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
         frameIndex += Tchunk
         chunkId += 1
     }
+    var stats = StreamingStats(avgMs: 0, p50Ms: 0, p90Ms: 0, count: 0)
     if !latenciesMs.isEmpty {
         let sorted = latenciesMs.sorted()
         let avg = sorted.reduce(0, +) / Double(sorted.count)
         let p50 = sorted[Int(Double(sorted.count - 1) * 0.5)]
         let p90 = sorted[Int(Double(sorted.count - 1) * 0.9)]
+        stats = StreamingStats(avgMs: avg, p50Ms: p50, p90Ms: p90, count: sorted.count)
         print(String(format: "⏱️ per-chunk latency: avg=%.2f ms, p50=%.2f ms, p90=%.2f ms (n=%d)", avg, p50, p90, sorted.count))
         if let csv = latencyCsvPath, !csv.isEmpty {
             do {
+                // Ensure parent directory exists before writing CSV
+                let url = URL(fileURLWithPath: csv)
+                let dir = url.deletingLastPathComponent()
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
                 var out = "chunk,latency_ms\n"
                 for (idx, ms) in latenciesMs.enumerated() {
                     out += "\(idx),\(String(format: "%.3f", ms))\n"
                 }
-                try out.write(to: URL(fileURLWithPath: csv), atomically: true, encoding: .utf8)
+                try out.write(to: url, atomically: true, encoding: .utf8)
                 print("📝 Latencies written to \(csv)")
             } catch {
                 print("[warn] Failed to write latency CSV: \(error)")
@@ -1102,6 +1372,7 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
         }
     }
     print("✅ Streaming loop completed: processed \(chunkId) chunk(s)")
+    return stats
 }
 
 // MARK: - Main Execution
@@ -1126,6 +1397,14 @@ var warmupCount = 1
 var latencyCsvPath: String? = nil
 var vocabPath: String? = nil
 var beamWidth: Int = 1
+var topKPerFrame: Int? = nil
+var blankGateMargin: Float? = nil
+var beamList: [Int]? = nil
+var benchTopK: Int = 0
+var benchVocab: Int = 0
+var benchIters: Int = 0
+var computeMode: String = "all"  // all | cpu | cpu-gpu
+var useAMXBeam: Bool = false
 
 // Primitive flag parsing: --mlpackage, --mlmodelc, --wav, --stream, --duration <sec>
 var i = 1
@@ -1150,6 +1429,27 @@ while i < commandLineArguments.count {
         if i + 1 < commandLineArguments.count { vocabPath = commandLineArguments[i+1]; i += 1 }
     case "--beam":
         if i + 1 < commandLineArguments.count { beamWidth = max(1, Int(commandLineArguments[i+1]) ?? 1); i += 1 }
+    case "--topk":
+        if i + 1 < commandLineArguments.count { let v = Int(commandLineArguments[i+1]) ?? 0; topKPerFrame = (v > 0) ? v : nil; i += 1 }
+    case "--blank-gate":
+        if i + 1 < commandLineArguments.count { let f = Float(commandLineArguments[i+1]) ?? 0; blankGateMargin = (f > 0) ? f : nil; i += 1 }
+    case "--beam-list":
+        if i + 1 < commandLineArguments.count {
+            let s = commandLineArguments[i+1]
+            let parts = s.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            beamList = parts.isEmpty ? nil : parts
+            i += 1
+        }
+    case "--bench-topk":
+        if i + 1 < commandLineArguments.count { benchTopK = max(0, Int(commandLineArguments[i+1]) ?? 0); i += 1 }
+    case "--bench-vocab":
+        if i + 1 < commandLineArguments.count { benchVocab = max(0, Int(commandLineArguments[i+1]) ?? 0); i += 1 }
+    case "--bench-iters":
+        if i + 1 < commandLineArguments.count { benchIters = max(0, Int(commandLineArguments[i+1]) ?? 0); i += 1 }
+    case "--compute":
+        if i + 1 < commandLineArguments.count { computeMode = commandLineArguments[i+1].lowercased(); i += 1 }
+    case "--beam-amx":
+        useAMXBeam = true
     default:
         // Backward compatibility: allow positional paths
         if mlpackagePath == MambaASRConstants.defaultMLPackagePath {
@@ -1175,29 +1475,72 @@ while i < commandLineArguments.count {
 /// - Error early-exit: Fast failure detection for invalid models
 /// - Memory efficiency: Single validation pass minimizes memory usage
 do {
-    // Attempt to load pre-compiled model for optimal performance
-    let compiledModelURL = URL(fileURLWithPath: compiledModelPath)
-    let validationModel: MLModel
-    
-    if FileManager.default.fileExists(atPath: compiledModelURL.path) {
-        // Load pre-compiled model directly for fastest startup
-        // Compiled models have optimizations baked in for target hardware
-        let configuration = MLModelConfiguration()
-        configuration.computeUnits = .all  // Enable ANE + GPU + CPU
-        validationModel = try MLModel(contentsOf: compiledModelURL, configuration: configuration)
-        print("📱 Loaded compiled model: \(compiledModelPath)")
+    // If running micro-bench, skip model loading entirely
+    if benchIters > 0 && benchVocab > 0 {
+        // Micro-benchmark: ctcBeamUpdate speed with synthetic frame probs
+        let V = benchVocab
+        var frame = [Float](repeating: 0, count: V)
+        for i in 0..<V { frame[i] = Float.random(in: -5...5) }
+        let K = max(1, beamWidth)
+        let topK = (benchTopK > 0) ? benchTopK : max(K * 3, 10)
+        var beams: [CTCBeamEntry] = [CTCBeamEntry(tokens: [], pBlank: 0, pNonBlank: -Float.infinity)]
+        let t0 = CFAbsoluteTimeGetCurrent()
+        for _ in 0..<benchIters {
+            let lps = logSoftmax(frame)
+            beams = ctcBeamUpdate(
+                beams: beams,
+                frameLogProbs: lps,
+                beamWidth: K,
+                blankId: MambaASRConstants.blankTokenIndex,
+                topKOverride: topK,
+                blankGateMargin: nil
+            )
+        }
+        let t1 = CFAbsoluteTimeGetCurrent()
+        let ms = (t1 - t0) * 1000.0
+        print(String(format: "🧪 Beam micro-bench: V=%d K=%d topK=%d iters=%d → %.2f ms total, %.4f ms/iter", V, K, topK, benchIters, ms, ms / Double(benchIters)))
     } else {
-        // Fallback to source .mlpackage with automatic compilation
-        // This path handles development workflow and first-time deployment
-        validationModel = try loadMLModel(at: mlpackagePath)
-        print("📦 Loaded and compiled model: \(mlpackagePath)")
-    }
-    
-    // Execute validation: single inference or streaming
-    if doStream {
-        try runStreaming(model: validationModel, wavPath: wavPath, durationSeconds: durationSeconds, warmupCount: warmupCount, latencyCsvPath: latencyCsvPath)
-    } else {
-        try runOnce(model: validationModel)
+        // Attempt to load pre-compiled model for optimal performance
+        let compiledModelURL = URL(fileURLWithPath: compiledModelPath)
+        let validationModel: MLModel
+        
+        if FileManager.default.fileExists(atPath: compiledModelURL.path) {
+            let configuration = MLModelConfiguration()
+            switch computeMode {
+            case "cpu": configuration.computeUnits = .cpuOnly
+            case "cpu-gpu": configuration.computeUnits = .cpuAndGPU
+            default: configuration.computeUnits = .all
+            }
+            validationModel = try MLModel(contentsOf: compiledModelURL, configuration: configuration)
+            print("📱 Loaded compiled model: \(compiledModelPath)")
+        } else {
+            let modelURL = URL(fileURLWithPath: mlpackagePath)
+            let compiledURL = try MLModel.compileModel(at: modelURL)
+            let configuration = MLModelConfiguration()
+            switch computeMode {
+            case "cpu": configuration.computeUnits = .cpuOnly
+            case "cpu-gpu": configuration.computeUnits = .cpuAndGPU
+            default: configuration.computeUnits = .all
+            }
+            validationModel = try MLModel(contentsOf: compiledURL, configuration: configuration)
+            print("📦 Loaded and compiled model: \(mlpackagePath)")
+        }
+        
+        // Execute validation: single inference or streaming
+        if doStream {
+        if let list = beamList, !list.isEmpty {
+            for b in list {
+                beamWidth = max(1, b)
+                print("\n==== Streaming with beam=\(beamWidth) ====")
+                let stats = try runStreaming(model: validationModel, wavPath: wavPath, durationSeconds: durationSeconds, warmupCount: warmupCount, latencyCsvPath: latencyCsvPath)
+                print(String(format: "📈 beam=%d summary: avg=%.2f ms p50=%.2f ms p90=%.2f ms (n=%d)", beamWidth, stats.avgMs, stats.p50Ms, stats.p90Ms, stats.count))
+            }
+        } else {
+            _ = try runStreaming(model: validationModel, wavPath: wavPath, durationSeconds: durationSeconds, warmupCount: warmupCount, latencyCsvPath: latencyCsvPath)
+        }
+        } else {
+            try runOnce(model: validationModel)
+        }
     }
     
     // Report successful validation for CI/CD pipeline integration

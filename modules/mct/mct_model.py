@@ -57,7 +57,7 @@ import torch.nn as nn
 
 from .frontend_cnn import FrontendCNN
 from .encoder_mamba import MambaEncoder
-from .predictor import RNNTPredictor
+from .predictor import RNNTPredictor, MLPStreamingPredictor
 from .joiner import RNNTJoiner
 
 
@@ -201,7 +201,7 @@ class MCTModel(nn.Module):
     - Calls RNNTJoiner.forward() for acoustic-linguistic alignment
     """
     
-    def __init__(self, cfg: MCTConfig):
+    def __init__(self, cfg: MCTConfig, *, export_no_rnn: bool = False):
         """Initialize MCT model with optimized component configuration.
         
         Sets up all four major components with Apple Silicon optimizations
@@ -222,8 +222,12 @@ class MCTModel(nn.Module):
         self.encoder = MambaEncoder(cfg.d_model, cfg.n_blocks, cfg.state_dim)
         
         # Component 3: RNN-T predictor for language modeling
-        # LSTM-based model for previous token context
-        self.predictor = RNNTPredictor(cfg.vocab_size, cfg.d_model, cfg.d_model)
+        # Default is GRU-based predictor. For export-only ANE friendliness,
+        # allow swapping to an MLP-based streaming predictor to avoid RNN ops.
+        if export_no_rnn:
+            self.predictor = MLPStreamingPredictor(cfg.vocab_size, cfg.d_model, cfg.d_model)
+        else:
+            self.predictor = RNNTPredictor(cfg.vocab_size, cfg.d_model, cfg.d_model)
         
         # Component 4: Joiner network for acoustic-linguistic fusion
         # Combines encoder and predictor outputs for final prediction

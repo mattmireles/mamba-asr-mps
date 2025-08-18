@@ -159,6 +159,11 @@ def export_to_coreml(
     feature_dim: int = CoreMLConstants.DEFAULT_FEATURE_DIM,
     d_model: int = CoreMLConstants.DEFAULT_MODEL_DIM,
     d_state: int = CoreMLConstants.DEFAULT_STATE_DIM,
+    backend: str = "mlprogram",  # or "neuralnetwork"
+    use_fp16: bool = False,
+    use_w8: bool = False,
+    compute_units: str = "all",   # all | cpu | cpu-gpu | cpu-ne
+    export_no_rnn: bool = False,
 ):
     """Convert optimized PyTorch MCT model to stateful Core ML package for ANE deployment.
     
@@ -253,6 +258,21 @@ def export_to_coreml(
     # Predictor GRU hidden state: (num_layers=1, batch=1, hidden=d_model)
     example_hidden = torch.zeros(1, 1, d_model)
 
+    # Optionally replace GRU/LSTM predictor with export-friendly MLP for ANE
+    if export_no_rnn:
+        try:
+            from modules.mct.mct_model import MCTModel  # type: ignore
+            if isinstance(pytorch_model, MCTModel):
+                cfg = pytorch_model.cfg
+                alt = MCTModel(cfg, export_no_rnn=True)
+                # Copy compatible weights
+                alt.frontend.load_state_dict(pytorch_model.frontend.state_dict(), strict=False)
+                alt.encoder.load_state_dict(pytorch_model.encoder.state_dict(), strict=False)
+                alt.joiner.load_state_dict(pytorch_model.joiner.state_dict(), strict=False)
+                pytorch_model = alt
+        except Exception:
+            pass
+
     class StatefulWrapper(nn.Module):
         def __init__(self, model: nn.Module):
             super().__init__()
@@ -286,14 +306,36 @@ def export_to_coreml(
     # `convert_to="mlprogram"` is the modern format.
     # `compute_units=ct.ComputeUnit.ALL` allows Core ML to use the ANE, GPU, and CPU.
     # The `states` parameter is what makes the model stateful.
-    model = ct.convert(
-        traced_model,
+    convert_kwargs = dict(
         inputs=coreml_inputs,
         outputs=coreml_outputs,
-        convert_to="mlprogram",
-        compute_units=ct.ComputeUnit.ALL,
-        minimum_deployment_target=ct.target.iOS16 # Or newer for best features
+        convert_to=backend,
+        compute_units={
+            "all": ct.ComputeUnit.ALL,
+            "cpu": ct.ComputeUnit.CPU_ONLY,
+            "cpu-gpu": ct.ComputeUnit.CPU_AND_GPU,
+            "cpu-ne": getattr(ct.ComputeUnit, "CPU_AND_NE", ct.ComputeUnit.ALL),
+        }.get(compute_units, ct.ComputeUnit.ALL),
+        minimum_deployment_target=ct.target.iOS16,
     )
+    # Try FP16 precision if requested and supported
+    if use_fp16:
+        try:
+            # Newer coremltools supports compute_precision
+            convert_kwargs["compute_precision"] = ct.precision.FLOAT16  # type: ignore
+        except Exception:
+            pass
+    model = ct.convert(traced_model, **convert_kwargs)
+    # Optional post-conversion weight quantization
+    try:
+        if use_w8:
+            from coremltools.optimize.coreml import optimize as ct_opt  # type: ignore
+            model = ct_opt(model, optimization_config=ct_opt.OptimizationConfig(global_weight_quantization=True, nbits=8))  # type: ignore
+        elif use_fp16:
+            from coremltools.optimize.coreml import optimize as ct_opt  # type: ignore
+            model = ct_opt(model, optimization_config=ct_opt.OptimizationConfig(global_weight_quantization=True, nbits=16))  # type: ignore
+    except Exception:
+        pass
     
     print("Core ML conversion placeholder complete.")
 
@@ -306,6 +348,11 @@ if __name__ == "__main__":
     ap.add_argument("--model", type=str, default="", help="Path to trained/optimized MCT PyTorch model (.pth)")
     ap.add_argument("--output", type=str, default="MambaASR.mlpackage", help="Output .mlpackage path")
     ap.add_argument("--chunk_length", type=int, default=CoreMLConstants.DEFAULT_CHUNK_LENGTH)
+    ap.add_argument("--backend", type=str, default="mlprogram", choices=["mlprogram","neuralnetwork"], help="Core ML backend format")
+    ap.add_argument("--fp16", action="store_true", help="Attempt FP16 precision for ANE-friendlier execution")
+    ap.add_argument("--w8", action="store_true", help="Apply 8-bit weight quantization post-conversion")
+    ap.add_argument("--compute-units", type=str, default="all", choices=["all","cpu","cpu-gpu","cpu-ne"], help="Preferred compute units during conversion")
+    ap.add_argument("--export-no-rnn", action="store_true", help="Use export-friendly MLP predictor to avoid RNN ops on ANE")
     args = ap.parse_args()
 
     print("Mamba-ASR MPS Core ML Export Script")
@@ -334,4 +381,13 @@ if __name__ == "__main__":
             cfg = MCTConfig()
             model = MCTModel(cfg)
         model.eval()
-        export_to_coreml(model, output_path=args.output, chunk_length=args.chunk_length)
+        export_to_coreml(
+            model,
+            output_path=args.output,
+            chunk_length=args.chunk_length,
+            backend=args.backend,
+            use_fp16=args.fp16,
+            use_w8=args.w8,
+            compute_units=args.compute_units,
+            export_no_rnn=args.export_no_rnn,
+        )

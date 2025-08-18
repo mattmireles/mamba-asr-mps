@@ -95,12 +95,60 @@ These notes capture concrete issues, fixes, and heuristics discovered while trai
   - Steady-state per-chunk ≈13–15 ms → ~0.05–0.06 s model-only time for a 10 s clip (4 chunks) post-warmup
   - Action: verify ANE execution via Activity Monitor (Neural Engine) during streaming; test with `--wav` real audio
 
+##### Beam step AMX-friendly optimization (today)
+- Changes:
+  - `logSoftmax` now returns `[Float]` (was `[Double]`), using vDSP/vForce and logf.
+  - Introduced `logSumExpF(Float,Float)`; kept Double variant for docs consistency.
+  - Replaced `Dictionary<String,CTCBeamEntry>` with `Dictionary<[Int],CTCBeamEntry>` to avoid per-frame string joins.
+  - Implemented iterative top-K (O(V·K)) instead of sorting full vocab each frame.
+- Result (pruned_layered; 10s; warmup=2; beam=3; real WAV): avg≈16.13 ms; p50≈15.66; p90≈16.93; n=8.
+- Prior beam=3 baseline on same model: avg≈18.51 ms. Net ~14% faster with tighter tail.
+ - With `--topk 6`: avg≈17.25 ms; p50≈16.82; p90≈17.86; n=8. Default top-K heuristic (max(3*beam,10)) remains preferable on CPU.
+ - With `--blank-gate 0.5`: avg≈16.97 ms; p50≈16.23; p90≈18.74; n=8. Gating offered no latency benefit on this input; disabled by default.
+
 ### Swift streaming (20s) for ANE verification (today)
 - QAT (20s): avg≈13.01 ms; p50≈12.95; p90≈13.31; n=8 → `exports/latency_MambaASR_qat_real_20s.csv`
 - Pruned (20s): avg≈13.25 ms; p50≈13.29; p90≈13.88; n=8 → `exports/latency_MambaASR_pruned_real_20s.csv`
 - Note: Watch Activity Monitor → GPU History → Neural Engine for utilization during runs.
 
+### Beam width sweep helper (today)
+- Added `--beam-list 1,3,5` to sweep beams in a single run.
+- Pruned_layered (10s; warmup=2; real WAV, Float32 decoder):
+  - beam=1: avg≈13.58 ms; p50≈13.42; p90≈14.09; n=8
+  - beam=3: avg≈13.00 ms; p50≈12.92; p90≈13.56; n=8
+  - beam=5: avg≈13.08 ms; p50≈13.06; p90≈13.21; n=8
+– Takeaway: AMX-friendly path reduces beam overhead; 1–5 has similar latency on CPU now.
+
 ### Per-layer structured pruning (today)
+### RNNT guard tightening + profiling spans (today)
+- Changes:
+  - Default `--max_align` tightened to 60k in `train_RNNT.py` based on observed T'·U histograms.
+  - Added fine-grained `record_function` spans in `modules/mamba/selective_scan_interface.py`: `ss_softplus_discretize`, `ss_state_transition_exp`, `ss_input_proj`, `ss_time_loop`, `ss_output_post` for Instruments.
+- Runs:
+  - CPU-grad forced (dev-clean; 120 steps): throughput≈1912 fps; loss: 359.32 → 77.05 → 95.18 → 108.89; align p50≈3,771 (T' p50≈127; U p50≈30); backend=100% cpu_grad.
+    - Artifacts: `logs/rnnt_cpu_grad_120_new.csv`, `checkpoints/rnnt_cpu_grad_120_new.pt`.
+  - Auto-backend (dev-clean; 150 steps): torchaudio selected but per-batch length mismatches → CPU-grad mapping; throughput≈1927 fps; loss: 412.52 → 85.47 → 131.69 → 62.69; align p50≈3,757; backend=100% cpu_grad.
+    - Artifacts: `logs/rnnt_auto_150_new.csv`, `checkpoints/rnnt_auto_150_new.pt`.
+- RNNT backend attempt: `pip install --no-build-isolation warp_rnnt` failed with "CPU version is not implemented" (expected). Staying with torchaudio + CPU-grad mapping path for stability on Apple Silicon.
+
+### Extended RNNT + Swift compute modes (today)
+- RNNT CPU-grad (dev-clean; 300 steps; forced): throughput≈2115 fps; loss 360.37 → 88.04 → 84.28 → 51.78; align p50≈3,642; T' p50≈126; U p50≈28; backend=100% cpu_grad.
+  - Artifacts: `logs/rnnt_cpu_grad_300_new.csv`, `checkpoints/rnnt_cpu_grad_300_new.pt`.
+- RNNT CPU-grad (dev-clean; 600 steps; forced): throughput≈1704 fps; loss 410.79 → 67.56 → 53.55 → 47.32; align p50≈3,432; T' p50≈132; U p50≈26; backend=100% cpu_grad.
+  - Artifacts: `logs/rnnt_cpu_grad_600_new.csv`, `checkpoints/rnnt_cpu_grad_600_new.pt`.
+- Swift streaming (10s; warmup=2; real WAV) across compute:
+  - all: avg≈17.75 ms; p50≈17.54; p90≈18.42; n=8
+  - cpuOnly: avg≈4.05 ms; p50≈4.02; p90≈4.20; n=8
+  - cpuAndGPU: avg≈18.32 ms; p50≈18.38; p90≈18.67; n=8
+- Note: Small-shape Core ML path appears on CPU fast path with very low latency; ANE visibility still to be confirmed via Activity Monitor for stateful variants.
+
+### 30s streaming CSV + 800-step RNNT (today)
+- Swift streaming 30s (warmup=2; real WAV):
+  - all: avg≈23.36 ms; p50≈23.18; p90≈25.64; n=8 → `exports/latency_compute_all_30s.csv`
+  - cpuOnly: avg≈6.84 ms; p50≈6.66; p90≈7.74; n=8 → `exports/latency_compute_cpu_30s.csv`
+  - cpuAndGPU: avg≈23.52 ms; p50≈22.32; p90≈25.05; n=8 → `exports/latency_compute_cpugpu_30s.csv`
+- RNNT CPU-grad (dev-clean; 800 steps; forced): throughput≈1520 fps; loss 331.76 → 52.00 → 96.49 → 80.87; align p50≈4,342; T' p50≈129; U p50≈32; backend=100% cpu_grad.
+  - Artifacts: `logs/rnnt_cpu_grad_800_new.csv`, `checkpoints/rnnt_cpu_grad_800_new.pt`.
 - Ran `scripts/optimize.py --technique prune --sparsity_map '{"Conv1d":0.30,"Conv2d":0.40,"Linear":0.30}' --save_model checkpoints/pruned_layered.pt`
 - Exported and validated: avg≈12.92 ms; p50≈12.95; p90≈13.20; n=8 → `exports/latency_MambaASR_pruned_layered.csv`
 - `scripts/optimize.py` now supports `--sparsity` and `--sparsity_map` for per-layer targets.

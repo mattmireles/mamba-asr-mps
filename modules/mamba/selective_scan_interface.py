@@ -167,35 +167,40 @@ def selective_scan(
     # Enables detailed timing analysis via PyTorch profiler and Instruments
     with record_function("selective_scan_naive"):
         # Step 1: Discretize parameters using softplus for numerical stability
-        delta_positive = F.softplus(delta + delta_bias.view(1, 1, -1))  # (B, L, D)
-        delta_positive = torch.clamp(delta_positive, min=SelectiveScanConstants.MIN_DELTA)
+        with record_function("ss_softplus_discretize"):
+            delta_positive = F.softplus(delta + delta_bias.view(1, 1, -1))  # (B, L, D)
+            delta_positive = torch.clamp(delta_positive, min=SelectiveScanConstants.MIN_DELTA)
 
         # Step 2: Compute discretized state transition matrices
-        delta_A = (delta_positive.unsqueeze(-1) * A.view(1, 1, A.shape[0], A.shape[1])).exp()
-        delta_A = torch.clamp(delta_A, max=1e10)
+        with record_function("ss_state_transition_exp"):
+            delta_A = (delta_positive.unsqueeze(-1) * A.view(1, 1, A.shape[0], A.shape[1])).exp()
+            delta_A = torch.clamp(delta_A, max=1e10)
 
         # Step 3: Compute discretized input projection (simplified)
-        delta_u = delta_positive * x  # (B, L, D)
-        delta_u_scalar = delta_u.mean(dim=2, keepdim=True)  # (B, L, 1)
-        delta_B_u = delta_u_scalar.unsqueeze(-1) * B_proj.unsqueeze(2)  # (B, L, 1, N)
+        with record_function("ss_input_proj"):
+            delta_u = delta_positive * x  # (B, L, D)
+            delta_u_scalar = delta_u.mean(dim=2, keepdim=True)  # (B, L, 1)
+            delta_B_u = delta_u_scalar.unsqueeze(-1) * B_proj.unsqueeze(2)  # (B, L, 1, N)
 
         # Step 4: Initialize state and output accumulation
         hidden_state = h0.clone()  # (B, D, N)
         output_timesteps = []
 
         # Step 5: Sequential state update loop (bottleneck)
-        for timestep in range(seq_len):
-            hidden_state = delta_A[:, timestep] * hidden_state + delta_B_u[:, timestep]
-            C_timestep = C_proj[:, timestep, :]  # (B, N)
-            y_timestep = torch.einsum("bdn,bn->bd", hidden_state, C_timestep)  # (B, D)
-            output_timesteps.append(y_timestep)
+        with record_function("ss_time_loop"):
+            for timestep in range(seq_len):
+                hidden_state = delta_A[:, timestep] * hidden_state + delta_B_u[:, timestep]
+                C_timestep = C_proj[:, timestep, :]  # (B, N)
+                y_timestep = torch.einsum("bdn,bn->bd", hidden_state, C_timestep)  # (B, D)
+                output_timesteps.append(y_timestep)
 
         # Step 6: Combine outputs and apply residual connections
-        output_sequence = torch.stack(output_timesteps, dim=1)  # (B, L, D)
-        skip_connection = x * D.view(1, 1, -1)
-        output_with_skip = output_sequence + skip_connection
-        gating_weights = torch.sigmoid(z)
-        final_output = output_with_skip * gating_weights
+        with record_function("ss_output_post"):
+            output_sequence = torch.stack(output_timesteps, dim=1)  # (B, L, D)
+            skip_connection = x * D.view(1, 1, -1)
+            output_with_skip = output_sequence + skip_connection
+            gating_weights = torch.sigmoid(z)
+            final_output = output_with_skip * gating_weights
         return final_output  # (B, L, D)
 
 

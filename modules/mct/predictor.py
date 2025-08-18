@@ -260,3 +260,83 @@ class RNNTPredictor(nn.Module):
         - Memory estimate: {PredictorConstants.get_memory_estimate(1, 100, self.vocab_size, self.embed_dim)}
         - Apple Silicon: Optimized for MPS backend
         """
+
+
+class MLPStreamingPredictor(nn.Module):
+    """Export-friendly predictor that avoids recurrent kernels.
+
+    This module provides a stateful predictor implemented purely with
+    dense layers and pointwise activations, which generally maps well
+    to ANE/GPU backends in Core ML. It keeps the same public interface
+    as `RNNTPredictor` for streaming, including hidden-state shape
+    compatibility with GRU (i.e., (num_layers=1, batch, d_model)).
+
+    Called by:
+    - `MCTModel.streaming_forward()` during export-only runs when enabled
+
+    Notes:
+    - Forward (non-streaming) is provided only for completeness and is
+      not used in training when this class is employed export-only.
+    - Hidden-state update is a simple Elman-style recurrence implemented
+      via linear layers, keeping ops ANE-friendly (GEMM + activation).
+    """
+
+    def __init__(self, vocab_size: int, d_model: int, embed_dim: int):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.embed_dim = embed_dim
+
+        self.token_embedding = nn.Embedding(
+            vocab_size,
+            embed_dim,
+            padding_idx=PredictorConstants.PADDING_TOKEN_ID,
+        )
+
+        # Combine current embedding and previous hidden
+        self.comb_linear = nn.Linear(embed_dim + d_model, d_model, bias=True)
+        self.activation = nn.ReLU()
+        self.proj_out = nn.Linear(d_model, d_model, bias=True)
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        # Non-streaming path: process full sequence without using recurrence
+        # tokens: (B, U)
+        B, U = tokens.shape
+        emb = self.token_embedding(tokens)  # (B, U, E)
+        # Collapse along U with a simple projection (not used in training path)
+        combined = self.activation(self.comb_linear(
+            torch.cat([emb, torch.zeros(B, U, self.d_model, device=emb.device, dtype=emb.dtype)], dim=-1)
+        ))
+        out = self.norm(self.proj_out(combined))  # (B, U, D)
+        return out
+
+    def forward_streaming(
+        self,
+        tokens: torch.Tensor,
+        hidden_state: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Streaming step compatible with GRU interface.
+
+        Args:
+            tokens: (B, 1) current token ids
+            hidden_state: (1, B, D) previous hidden, or None
+
+        Returns:
+            output: (B, 1, D) predictor features
+            new_hidden: (1, B, D) next hidden state
+        """
+        B = tokens.shape[0]
+        emb = self.token_embedding(tokens).squeeze(1)  # (B, E)
+        if hidden_state is None:
+            prev_h = torch.zeros(B, self.d_model, device=emb.device, dtype=emb.dtype)
+        else:
+            # Expect (1, B, D) like GRU hidden; take last layer
+            prev_h = hidden_state[-1]
+
+        combined = torch.cat([emb, prev_h], dim=-1)  # (B, E+D)
+        h = self.activation(self.comb_linear(combined))  # (B, D)
+        out = self.norm(self.proj_out(h))  # (B, D)
+        out_seq = out.unsqueeze(1)  # (B, 1, D)
+        new_hidden = out.unsqueeze(0)  # (1, B, D)
+        return out_seq, new_hidden

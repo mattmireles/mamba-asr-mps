@@ -1,7 +1,7 @@
 version: "Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)"
 options: "8d6737ac303b9c4482b307f233c7dfa483dc324561374919743555a5df899847"
-build_start_time: [1755487318, 801608000]
-build_end_time: [1755487321, 747751000]
+build_start_time: [1755496172, 468545000]
+build_end_time: [1755496175, 267122000]
 inputs:
   ? "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/swift/MambaASRRunner/Sources/MambaASRRunner/main.swift"
-  : [1755487300, 936026909]
+  : [1755496164, 904718211]

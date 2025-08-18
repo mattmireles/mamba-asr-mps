@@ -490,7 +490,7 @@ Notes:
 
 #### Immediate next steps
 - Keep explicit loss/greedy-WER logging when CPU-grad RNNT path is taken (landed)
-- Run a longer dev-clean epoch using the CPU-grad RNNT path to collect loss trajectory and initial WER (in progress; 60-step pass logged above)
+- Run a longer dev-clean epoch using the CPU-grad RNNT path to collect loss trajectory and initial WER (progressed: new 120-step run below)
 - Tighten alignment-size guards based on observed T'/U distributions from LibriSpeech
 - Profile `selective_scan` hotspots with Instruments; annotate slow spans in code
 - Evaluate migration from deprecated `torchaudio.functional.rnnt_loss` to either `warp_rnnt` (build with `--no-build-isolation`) or a maintained RNNT op once available
@@ -498,6 +498,60 @@ Notes:
   - New: Structured logging added (`--log_csv`) to capture per-step (loss, T', U, align, backend, finite). Summarize align p50/p90/p99 and backend usage after each run.
   - Done: Adjusted RNNT CPU-grad behavior — added `--force_cpu_grad` to explicitly force per-batch CPU-grad; deprecated `--rnnt_cpu_grad` (auto CPU fallback now happens on failure only). Backend usage reporting is now accurate.
   - Done: Added checkpoint saving (`--save_ckpt`) at end of training; defaults to `Mamba-ASR-MPS/checkpoints/rnnt_<ts>.pt` when not specified.
+
+##### Today: tightened caps, instrumented selective_scan, RNNT runs
+- Code edits:
+  - `train_RNNT.py`: default `--max_align` tightened to 60k (from 250k) based on LibriSpeech T'·U histograms.
+  - `modules/mamba/selective_scan_interface.py`: added fine-grained `record_function` spans (`ss_softplus_discretize`, `ss_state_transition_exp`, `ss_input_proj`, `ss_time_loop`, `ss_output_post`) for Instruments.
+- RNNT CPU‑grad (dev‑clean; 120 steps; forced cpu‑grad; max_align=60k):
+  - Throughput: encoder ≈1912 fps (bs=2)
+  - Loss snapshots: 359.32 → 77.05 → 95.18 → 108.89 (every ~10 steps)
+  - Align stats: p50≈3,771; p90≈5,018; p99≈5,472; max≈5,472
+  - T' caps: p50≈127; p90≈144; max≈148; U caps: p50≈30; p90≈39; max≈40
+  - Backend usage: 100% cpu_grad
+  - Artifacts: `checkpoints/rnnt_cpu_grad_120_new.pt`, `logs/rnnt_cpu_grad_120_new.csv`
+- RNNT auto‑backend (dev‑clean; 150 steps; max_align=60k):
+  - Behavior: torchaudio selected; frequent input/output length mismatches → per‑batch CPU‑grad mapping engaged
+  - Throughput: encoder ≈1927 fps (bs=2)
+  - Loss snapshots: 412.52 → 85.47 → 131.69 → 62.69 (every ~10 steps)
+  - Align stats: p50≈3,757; p90≈4,812; p99≈5,490; max≈5,513
+  - T'/U caps: T' p50≈127 (p90≈142; max≈149); U p50≈32 (p90≈37; max≈39)
+  - Backend usage: 100% cpu_grad (fallbacks)
+  - Artifacts: `checkpoints/rnnt_auto_150_new.pt`, `logs/rnnt_auto_150_new.csv`
+- `warp_rnnt` install attempt (`--no-build-isolation`): failed with "CPU version is not implemented" during metadata prep (expected on Apple Silicon without CUDA). Staying on torchaudio + CPU‑grad map for now.
+
+##### Extended RNNT run + Swift compute-mode sweep (today)
+- RNNT CPU‑grad (dev‑clean; 300 steps; forced cpu‑grad; max_align=60k):
+  - Throughput: encoder ≈2115 fps (bs=2)
+  - Loss snapshots: 360.37 → 88.04 → 84.28 → 51.78
+  - Align stats: p50≈3,642; p90≈5,026; p99≈5,385; max≈5,476
+  - T'/U caps: T' p50≈126 (p90≈144; max≈148); U p50≈28 (p90≈38; max≈39)
+  - Backend: 100% cpu_grad
+  - Artifacts: `checkpoints/rnnt_cpu_grad_300_new.pt`, `logs/rnnt_cpu_grad_300_new.csv`
+- RNNT CPU‑grad (dev‑clean; 600 steps; forced cpu‑grad; max_align=60k):
+  - Throughput: encoder ≈1704 fps (bs=2)
+  - Loss snapshots: 410.79 → 67.56 → 53.55 → 47.32
+  - Align stats: p50≈3,432; p90≈5,434; p99≈5,646; max≈5,720
+  - T'/U caps: T' p50≈132 (p90≈143; max≈149); U p50≈26 (p90≈39; max≈40)
+  - Backend: 100% cpu_grad
+  - Artifacts: `checkpoints/rnnt_cpu_grad_600_new.pt`, `logs/rnnt_cpu_grad_600_new.csv`
+- Swift streaming across compute units (10s; warmup=2; real WAV):
+  - compute=all: avg≈17.75 ms; p50≈17.54; p90≈18.42; n=8
+  - compute=cpuOnly: avg≈4.05 ms; p50≈4.02; p90≈4.20; n=8
+  - compute=cpuAndGPU: avg≈18.32 ms; p50≈18.38; p90≈18.67; n=8
+  - Note: current Core ML model likely executing small shapes on CPU fast-path; ANE not explicitly visible here. Continue to verify with Activity Monitor and stateful export variants.
+- Swift streaming 30s CSV (warmup=2; real WAV):
+  - compute=all: avg≈23.36 ms; p50≈23.18; p90≈25.64; n=8 → `exports/latency_compute_all_30s.csv`
+  - compute=cpuOnly: avg≈6.84 ms; p50≈6.66; p90≈7.74; n=8 → `exports/latency_compute_cpu_30s.csv`
+  - compute=cpuAndGPU: avg≈23.52 ms; p50≈22.32; p90≈25.05; n=8 → `exports/latency_compute_cpugpu_30s.csv`
+  - Observation: CPU path is fastest for this current exported graph; investigate ANE targeting next.
+- RNNT CPU‑grad (dev‑clean; 800 steps; forced cpu‑grad; max_align=60k):
+  - Throughput: encoder ≈1520 fps (bs=2)
+  - Loss snapshots: 331.76 → 52.00 → 96.49 → 80.87
+  - Align stats: p50≈4,342; p90≈5,204; p99≈5,895; max≈5,920
+  - T'/U caps: T' p50≈129 (p90≈146; max≈149); U p50≈32 (p90≈39; max≈40)
+  - Backend: 100% cpu_grad
+  - Artifacts: `checkpoints/rnnt_cpu_grad_800_new.pt`, `logs/rnnt_cpu_grad_800_new.csv`
 
 ##### Device validation with real WAVs (today)
 - Inputs:
@@ -614,11 +668,22 @@ Notes:
 - Pruned_layered (beam=3; 10s): avg≈18.12 ms; p50≈17.74; p90≈19.92; n=8; transcript printed
 - Notes: Beam introduces extra per-frame compute on CPU; can be offloaded later to AMX/Accelerate.
 
+###### Beam step AMX-friendly optimizations (today)
+- Switched beam math to Float32 log-domain (`logSoftmax` now returns `[Float]`; added `logSumExpF`) to align with Accelerate/AMX fast paths.
+- Replaced `String`-keyed beam map with `[[Int]: CTCBeamEntry]` to avoid per-step string joins/allocs.
+- Implemented O(V·K) top-K selection per frame (iterative max) to remove full `sorted` over vocab.
+- Preallocated/reused small buffers; reserved capacities to reduce reallocations.
+- Result (pruned_layered, beam=3; 10s; warmup=2; real WAV): avg≈16.13 ms; p50≈15.66; p90≈16.93; n=8.
+  - Prior beam=3 baseline was avg≈18.51 ms on same model; ~14% faster and tighter p90.
+  - With `--topk 6`: avg≈17.25 ms; p50≈16.82; p90≈17.86; n=8 (slightly slower; default heuristic remains good).
+  - With `--blank-gate 0.5`: avg≈16.97 ms; p50≈16.23; p90≈18.74; n=8 (no benefit for this model/audio; keep off by default).
+  - After preallocating audio MLMultiArray: avg≈17.88 ms; p50≈18.17; p90≈18.62; n=8 (regressed; likely due to NSNumber write loop overhead). Reverting to per-chunk allocate for now.
+
 ###### Beam width tuning (10s clips; warmup=2)
-- Pruned_layered:
-  - beam=1 (greedy): avg≈18.30 ms; p50≈17.52; p90≈20.26; n=8
-  - beam=3: avg≈18.51 ms; p50≈16.88; p90≈21.42; n=8
-  - beam=5: avg≈19.78 ms; p50≈16.19; p90≈24.79; n=8
+- Pruned_layered (after Float32 + O(V·K) + gating infra):
+  - beam=1 (greedy): avg≈13.58 ms; p50≈13.42; p90≈14.09; n=8
+  - beam=3: avg≈13.00 ms; p50≈12.92; p90≈13.56; n=8
+  - beam=5: avg≈13.08 ms; p50≈13.06; p90≈13.21; n=8
 - QAT (pt2e eager):
   - beam=1: avg≈16.76 ms; p50≈14.84; p90≈19.75; n=8
   - beam=3: avg≈23.32 ms; p50≈16.30; p90≈25.96; n=8
@@ -627,3 +692,4 @@ Notes:
   - beam=3: avg≈13.55 ms; p50≈13.43; p90≈13.87; n=8
   - beam=5: avg≈17.27 ms; p50≈16.56; p90≈19.83; n=8
 - Takeaway: beam=1–3 is a good latency sweet spot on CPU; higher beams increase variance. Future: offload to AMX for stable low latency.
+  - With AMX-friendly Float32 path, beam=3 overhead is reduced; next step is vectorizing merges and exploring BNNS for further gains.
