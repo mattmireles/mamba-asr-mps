@@ -768,6 +768,7 @@ def main():
     parser.add_argument("--log_csv", type=str, default="", help="Optional path to write per-step metrics CSV (step, loss, t_cap, u_cap, align, backend, finite)")
     parser.add_argument("--log_json", type=str, default="", help="Optional path to write summary metrics JSON at end of run")
     parser.add_argument("--save_ckpt", type=str, default="", help="Optional path to save a checkpoint at the end of training (.pt)")
+    parser.add_argument("--adaptive_ctc_after_cpu_grad", type=int, default=0, help="If >0, after N consecutive cpu_grad RNNT batches, force encoder-CTC fallback for remainder of run")
     args = parser.parse_args()
 
     device = get_device() if args.device == "auto" else torch.device(args.device)
@@ -850,6 +851,8 @@ def main():
     start = time.time()
     with ctx:
         for epoch in range(args.epochs):
+            consecutive_cpu_grad = 0
+            force_ctc_rest = False
             for step, batch in enumerate(dl):
                 # Support both dummy and LibriSpeech collates
                 texts = None
@@ -884,6 +887,22 @@ def main():
                     rnnt_use_naive = (rnnt_backend == "naive") or (rnnt_backend == "none" and (logits.shape[1] <= 64 and logits.shape[2] <= 16))
                 # logits: (B, T, U, V)
                 backend_used = "unknown"
+                # Adaptive CTC fallback gate
+                if force_ctc_rest and not args.force_naive_rnnt:
+                    with record_function("ctc_fallback_compute"):
+                        enc_only = logits.max(dim=2).values  # (B, T, V)
+                        logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
+                        targets = []
+                        for b in range(tokens.shape[0]):
+                            toks = tokens[b, 1 : token_lens[b]]
+                            targets.append(toks)
+                        flat = torch.cat(targets)
+                        tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
+                        loss = ctc_loss(logp, flat, out_lens, tgt_lens)
+                        backend_used = "ctc"
+                    goto_metrics = True
+                else:
+                    goto_metrics = False
                 # If explicitly requested, run CPU-grad RNNT per-batch (stability baseline)
                 if args.force_cpu_grad and (rnnt_loss is not None) and (rnnt_backend in ("torchaudio", "warp_rnnt")):
                     try:
@@ -944,7 +963,7 @@ def main():
                 if args.rnnt_cpu_grad and not args.force_cpu_grad and step == 0:
                     print("[notice] --rnnt_cpu_grad is deprecated. CPU-grad fallback happens automatically on failures. Use --force_cpu_grad to force CPU-grad for all batches.")
                 # mps_native facade path
-                if rnnt_mps_facade is not None:
+                if not goto_metrics and rnnt_mps_facade is not None:
                     with record_function("rnnt_loss_mps_native"):
                         try:
                             loss_or, grad_logits, which = rnnt_mps_facade(logits, tokens, out_lens, token_lens, blank=0, max_align=args.rnnt_max_align)
@@ -968,7 +987,7 @@ def main():
                                 loss = loss_or
                         except Exception as e:
                             print(f"mps_native facade failed ({e}); will try fast backend or CTC fallback.")
-                elif (not args.force_naive_rnnt) and (rnnt_loss is not None) and (rnnt_backend in ("torchaudio", "warp_rnnt")):
+                elif not goto_metrics and (not args.force_naive_rnnt) and (rnnt_loss is not None) and (rnnt_backend in ("torchaudio", "warp_rnnt")):
                     with record_function("rnnt_loss_compute"):
                         log_probs = logits.log_softmax(dim=-1)
                         try:
@@ -1121,6 +1140,16 @@ def main():
                             backend_used = "ctc"
 
                 is_finite = bool(torch.isfinite(loss))
+                # Update adaptive CTC switch based on backend usage
+                if args.adaptive_ctc_after_cpu_grad > 0:
+                    if backend_used == "cpu_grad":
+                        consecutive_cpu_grad += 1
+                        if consecutive_cpu_grad >= args.adaptive_ctc_after_cpu_grad:
+                            if not force_ctc_rest:
+                                print(f"[adaptive] Switching to encoder-CTC fallback for rest of run after {consecutive_cpu_grad} consecutive cpu_grad batches.")
+                            force_ctc_rest = True
+                    elif backend_used in ("ta", "warp"):
+                        consecutive_cpu_grad = 0
                 if args.skip_non_finite and (not is_finite):
                     print(f"Skipping non-finite loss at step {step}: {loss.item() if loss.numel()==1 else 'tensor'}")
                     optimizer.zero_grad(set_to_none=True)
