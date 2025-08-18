@@ -261,7 +261,9 @@ Note: The quick probe trace confirms active MPSGraph execution. For CPU-op enume
     These reinforce mps_native as the best default on this machine/config.
   - With tighter align cap (`--rnnt_max_align 40000`), mps_native sanity run: ~1445 frames/sec (CSV: `exports/rnnt_mps_native_60_align40k.csv`).
   - CSV summaries (mean over logged steps):
-    - rnnt_mps_native_60.csv: mean_loss≈211.3, mean_align≈4527.8 (n=4)
-    - rnnt_auto_60.csv: mean_loss≈225.9, mean_align≈4000.8 (n=4)
-    - rnnt_cpu_grad_60.csv: mean_loss≈269.2, mean_align≈2571.0 (n=4)
-    - rnnt_mps_native_60_align40k.csv: mean_loss≈333.7, mean_align≈4781.8 (n=4)
+    - rnnt_mps_native_60.csv: mean_loss≈211.3, mean_align≈4527.8, mean_Tcap≈123.2, mean_Ucap≈36.8 (n=4)
+    - rnnt_auto_60.csv: mean_loss≈225.9, mean_align≈4000.8, mean_Tcap≈114.0, mean_Ucap≈35.2 (n=4)
+    - rnnt_cpu_grad_60.csv: mean_loss≈269.2, mean_align≈2571.0, mean_Tcap≈123.5, mean_Ucap≈21.2 (n=4)
+    - rnnt_mps_native_60_align40k.csv: mean_loss≈333.7, mean_align≈4781.8, mean_Tcap≈139.0, mean_Ucap≈34.5 (n=4)
+    - rnnt_ctc_60.csv: mean_loss≈11.0, mean_Tcap≈120.2, mean_Ucap≈30.8 (n=4) [encoder-only CTC fallback]
+    - rnnt_naive_20.csv: naive small-T,U sanity run (T'=64, U=16) throughput ~406 fps

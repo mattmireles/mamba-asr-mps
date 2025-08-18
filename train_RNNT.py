@@ -752,7 +752,7 @@ def main():
     parser.add_argument("--profile", action="store_true", help="Enable MPS profiler context where available")
     parser.add_argument("--manifest", type=str, default="", help="Path to LibriSpeech CSV manifest for RNNT training")
     parser.add_argument("--force_naive_rnnt", action="store_true", help="Force small T',U for naive RNNT loss path")
-    parser.add_argument("--rnnt_impl", type=str, default="auto", choices=["auto", "torchaudio", "warp_rnnt", "naive", "ctc", "mps_native"], help="Select RNN-T loss implementation")
+    parser.add_argument("--rnnt_impl", type=str, default="mps_native", choices=["auto", "torchaudio", "warp_rnnt", "naive", "ctc", "mps_native"], help="Select RNN-T loss implementation")
     parser.add_argument("--max_align", type=int, default=60000, help="Maximum allowed T'*U alignment size before clamping/fallback (default tightened based on LibriSpeech T'·U distributions)")
     parser.add_argument("--max_samples", type=int, default=0, help="Limit number of samples from manifest for a short pass (0 = all)")
     parser.add_argument("--max_steps", type=int, default=0, help="Limit number of optimizer steps for a short pass (0 = full epoch)")
