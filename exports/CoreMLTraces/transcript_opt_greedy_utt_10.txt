@@ -1,7 +1,7 @@
 📦 Loaded and compiled model: /Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/exports/MambaASR_opt.mlpackage
 [warn] Not enough frames (227) for one chunk (256).
 📝 Greedy transcript: kosotnrg'lnjndsndhxowndv novrnloanovoadxoqovaeksnunq
-⏱️ per-chunk latency: avg=4.41 ms, p50=4.41 ms, p90=4.41 ms (n=1)
+⏱️ per-chunk latency: avg=4.29 ms, p50=4.29 ms, p90=4.29 ms (n=1)
 ✅ Streaming loop completed: processed 1 chunk(s)
 🎉 MambaASR Core ML validation completed successfully
 ✅ Model is ready for iOS/macOS deployment
