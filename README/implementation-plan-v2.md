@@ -579,74 +579,69 @@ Latest streaming latency summary:
   - **Action:** Abandoned all Instruments-based profiling. Implemented direct, manual timing in `CMHello.swift` using `CFAbsoluteTimeGetCurrent`.
   - **Outcome:** Successfully captured definitive baseline performance numbers for model load (213.76 ms) and prediction (160.55 ms).
   - **Status:** The project is now fully unblocked. We have a reliable, if simple, method for performance measurement. The next step is to integrate this manual timing into the main `MambaASRRunner` and begin optimizing against this new baseline.
-\nLatest streaming latency summary:
 
-```text
-## Streaming latency summary
+### **Phase 4: Implement Production Training Pipeline**
 
-| metric | ms |
-|---|---:|
-| count | 8 |
-| avg | 20.496 |
-| p50 | 19.973 |
-| p90 | 24.063 |
-| p99 | 24.088 |
-```
-\nLatest streaming latency summary:
+**Goal:** Develop a complete, end-to-end training system capable of training the Mamba-ASR model on the full dataset, validating its performance, and producing a production-ready Core ML model with a learned projection head.
 
-```text
-## Streaming latency summary
+**Rationale:** The existing infrastructure for evaluation and Core ML export is solid but requires a fully trained model to be effective. This phase bridges that gap by building the necessary training scripts and processes.
 
-| metric | ms |
-|---|---:|
-| count | 8 |
-| avg | 20.496 |
-| p50 | 19.973 |
-| p90 | 24.063 |
-| p99 | 24.088 |
-```
-\n## Latency sweep results
+**Step 4.1: Develop the Core Training Script (`train.py`)**
 
-# Latency sweep (compute modes and chunk sizes)
+*   **Objective:** Create a Python script responsible for the entire training lifecycle.
+*   **Key Components:**
+    *   **Data Loading:** Implement a PyTorch `Dataset` and `DataLoader` for handling the audio dataset. Must support audio preprocessing (resampling, feature extraction) and transcript tokenization.
+    *   **Model Architecture:** Define the Mamba-ASR model in PyTorch. Crucially, this must include a final `torch.nn.Linear(1024, 29)` classification head to produce logits for the 29-character vocabulary.
+    *   **Training Setup:** Configure the optimizer (e.g., AdamW), learning rate scheduler, and the loss function (CTC Loss: `nn.CTCLoss`).
+    *   **Argument Parsing:** Use `argparse` to manage hyperparameters like learning rate, batch size, epochs, and checkpoint paths.
 
-## all_c256
+Status: Implemented `Mamba-ASR-MPS/train.py`.
+- Data: uses `datasets/librispeech_csv.py` with mel extraction and `CharTokenizer`.
+- Model: `ConMambaCTC` backbone (V=1024) + final `nn.Linear(1024, 29)` projection head named `proj`.
+- Training: AdamW + CosineAnnealingLR, `nn.CTCLoss(blank=0)`, gradient clip, MPS-aware.
+- Args: `--train-csv`, `--val-csv`, `--epochs`, `--batch-size`, `--lr`, `--d-model`, `--n-blocks`, paths, and `--freeze-backbone`.
 
-## Streaming latency summary
+**Step 4.2: Implement the Training and Validation Loop**
 
-| metric | ms |
-|---|---:|
-| count | 8 |
-| avg | 20.960 |
-| p50 | 20.439 |
-| p90 | 23.684 |
-| p99 | 24.770 |
+*   **Objective:** Write the core logic for training the model and evaluating its performance periodically.
+*   **Implementation Details:**
+    *   **Training Loop:**
+        *   Iterate over the training `DataLoader`.
+        *   Perform the forward pass to get model logits.
+        *   Calculate CTC loss.
+        *   Perform the backward pass and optimizer step.
+        *   Log training loss and other relevant metrics (e.g., gradient norm).
+    *   **Validation Loop:**
+        *   Run periodically (e.g., after each epoch).
+        *   Iterate over a held-out validation dataset.
+        *   Run inference in `torch.no_grad()` mode.
+        *   Calculate validation loss.
+        *   **Crucially, calculate Character Error Rate (CER)** on the validation set. This is the primary metric for tracking model quality.
+    *   **Checkpointing:**
+        *   Save model checkpoints (`.pt` files) regularly.
+        *   Implement logic to save the "best" model based on the lowest validation CER achieved so far.
 
-## cpu_c256
+Status: Implemented.
+- Training loop computes CTC loss over 29-class head; logs running loss.
+- Validation computes loss and CER via greedy CTC decode; tracks best CER and saves `exports/checkpoints/best.pt`.
 
-## Streaming latency summary
+**Step 4.3: Integrate the Evaluation and Export Harness**
 
-| metric | ms |
-|---|---:|
-| count | 8 |
-| avg | 5.116 |
-| p50 | 5.021 |
-| p90 | 6.209 |
-| p99 | 6.494 |
+*   **Objective:** Automate the process of evaluating a trained checkpoint and preparing it for deployment.
+*   **Workflow:** At the end of a successful training run (or triggered manually on a specific checkpoint):
+    1.  **Extract Projection Matrix:** The training script will call `scripts/extract_projection_from_ckpt.py` on the best saved checkpoint to generate the `exports/projection_1024x29.csv` file. This provides the learned weights needed for accurate decoding.
+    2.  **Export to Core ML:** (Optional for now) Export remains via `scripts/export_coreml.py` for MCT; projection is consumed by Swift runner.
+    3.  **Run Batch Evaluation:** The script executes `scripts/eval_batch.sh`. With the learned `projection_1024x29.csv` present, the harness uses it automatically for accurate CER.
+    4.  **Final Report:** The CER from this final evaluation will be the official performance metric for the trained model.
 
-## cpu-gpu_c256
+Status: Implemented step (1) and (3) inside `train.py` post-run; (2) left optional pending full end-to-end export with 29-class head.
 
-## Streaming latency summary
+**Step 4.4: Documentation and Handover**
 
-| metric | ms |
-|---|---:|
-| count | 8 |
-| avg | 17.499 |
-| p50 | 16.812 |
-| p90 | 19.485 |
-| p99 | 20.316 |
+*   **Objective:** Ensure the entire training and evaluation process is clearly documented.
+*   **Tasks:**
+    *   Update `README.md` with instructions on how to run a full training process.
+    *   Document the arguments and expected inputs/outputs for `train.py`.
+    *   Provide a clear guide on how to interpret the final evaluation reports.
 
-
----
-
-- 2025-08-19: Resumed plan execution. Next actions: integrate manual `CFAbsoluteTimeGetCurrent` timings into `MambaASRRunner` (not just `CMHello.swift`), re-run 10s streaming latency CSVs across KD/QAT/Pruned models with `compute=cpu` and chunk=256, and update results here. Training notes updated with RNNT guard tightening and latest CPU-grad runs.
-  - 10s streaming latency re-run complete (chunk=256): CPU avg — opt 4.17 ms; opt2 4.11 ms; w8 4.15 ms. ALL/cpu-gpu modes logged. Training notes updated with commands and CSV locations.
+Status: Partially complete. `train.py` contains comprehensive docstrings and CLI `--help`. Top-level README updates pending after first end-to-end run.

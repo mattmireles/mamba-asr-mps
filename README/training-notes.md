@@ -170,6 +170,57 @@ These notes capture concrete issues, fixes, and heuristics discovered while trai
   - QAT short pass: last_loss≈0.0; encoder throughput≈2942.4 fps (fake-quant; deprecation suggests torchao PT2E migration)
   - Structured pruning short pass: last_loss≈0.0; encoder throughput≈2474.1 fps
 
+---
+
+### 2025-08-19 Phase 4 (Production Training Pipeline) – Work Log
+
+- Implemented `Mamba-ASR-MPS/train.py` with ConMamba (V=1024) backbone + learned `nn.Linear(1024,29)` projection head (`proj`).
+  - Loss: `nn.CTCLoss(blank=0, zero_infinity=True)`.
+  - Checkpointing: saves `exports/checkpoints/{last.pt,best.pt}` by lowest validation CER.
+  - End-of-run: extracts projection via `scripts/extract_projection_from_ckpt.py` and runs `scripts/eval_batch.sh` (optional).
+
+- Data loader and stability improvements:
+  - Added adaptive workers: `--num-workers -1` auto-detects cores via `utils/hardware.get_optimal_worker_count()`; manual override still supported.
+  - Added `PerformanceMonitor` to log `[Perf] GPU-busy | Data-wait` for tuning workers/batch size.
+  - Mitigated CTC NaNs: filter invalid samples (require `target_len>0` and `input_len>=target_len`) and skip non-finite losses.
+  - Resolved multiprocessing pickling error by avoiding passing tokenizer into dataset/workers; tokenizer created only in main process for CER.
+
+- Sanity training:
+  - Projection-head warm start (frozen backbone) on LibriSpeech manifests completes; CER tracked on validation.
+  - Warnings expected: torchaudio deprecations and CTC CPU fallback on MPS.
+
+- How to run (current best settings on M2 Studio):
+  - Warm start:
+    ```bash
+    PYTHONPATH="$(pwd)/Mamba-ASR-MPS" PYTORCH_ENABLE_MPS_FALLBACK=1 \
+    python Mamba-ASR-MPS/train.py \
+      --train-csv "/Users/mattmireles/Documents/Training Data/LibriSpeech/train-clean-100.csv" \
+      --val-csv   "/Users/mattmireles/Documents/Training Data/LibriSpeech/dev-clean.csv" \
+      --epochs 2 --batch-size 4 --lr 3e-4 --d-model 256 --n-blocks 6 \
+      --num-workers 8 --checkpoint-dir Mamba-ASR-MPS/exports/checkpoints \
+      --log-interval 100 --freeze-backbone
+    ```
+  - Full finetune (unfreeze, example 20 epochs):
+    ```bash
+    PYTHONPATH="$(pwd)/Mamba-ASR-MPS" PYTORCH_ENABLE_MPS_FALLBACK=1 \
+    python Mamba-ASR-MPS/train.py \
+      --train-csv "/Users/mattmireles/Documents/Training Data/LibriSpeech/train-clean-100.csv" \
+      --val-csv   "/Users/mattmireles/Documents/Training Data/LibriSpeech/dev-clean.csv" \
+      --epochs 20 --batch-size 4 --lr 3e-4 --d-model 256 --n-blocks 6 \
+      --num-workers 8 --checkpoint-dir Mamba-ASR-MPS/exports/checkpoints \
+      --log-interval 100
+    ```
+
+- Post-run evaluation steps:
+  1) Extract projection: `exports/projection_1024x29.csv` from best checkpoint.
+  2) Ensure `.mlpackage` symlink exists (e.g., `MambaASR_opt.mlpackage`).
+  3) Run `scripts/eval_batch.sh`; read CER in `exports/CoreMLTraces/wer_cer_overview_opt.md`.
+
+- Env notes:
+  - If you see MPS watermark errors, reset: `unset PYTORCH_MPS_LOW_WATERMARK_RATIO PYTORCH_MPS_HIGH_WATERMARK_RATIO`.
+  - CTC falls back to CPU on MPS; this is expected.
+
+
 - Core ML analysis (planned)
   - Artifacts captured: `exports/CoreMLTraces/quick_probe.trace`, `fp16_w8_analysis.trace` (+ TOC XMLs). CLI export of per-op CPU list is limited; enumerate CPU ops in Instruments UI (Operations view → Location=CPU) and copy into plan remediation table.
 

@@ -9,4 +9,9 @@ Reference: Mamba-ASR-MPS/exports/reference_10s.txt
 | pruned | beam3 | 1.000 | 1.000 |
 | pruned | greedy | 1.000 | 1.000 |
 | qat | beam3 | 1.000 | 1.000 |
+| transcript_qat_beam3_hello | - | 1.000 | 1.000 |
 | qat | greedy | 1.833 | 1.000 |
+| transcript_qat_greedy_hello | - | 1.000 | 1.000 |
+| transcript_qat_greedy_hello_long | - | 0.972 | 1.000 |
+| transcript_qat_greedy_hello_padded | - | 1.000 | 1.000 |
+| transcript_qat_greedy_synth | - | 1.000 | 1.000 |

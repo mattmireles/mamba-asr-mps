@@ -108,7 +108,37 @@ try:
 except Exception:
     HAS_TORCHAUDIO = False
 
-from utils.tokenizer import CharTokenizer
+from typing import Any as _Any
+# Optional import of project tokenizer; fall back to a local minimal version
+try:
+    import sys as _sys
+    from pathlib import Path as _Path
+    _ds_here = _Path(__file__).resolve().parents[1]
+    if str(_ds_here) not in _sys.path:
+        _sys.path.insert(0, str(_ds_here))
+    from utils.tokenizer import CharTokenizer  # type: ignore
+except Exception:
+    class CharTokenizer:  # minimal fallback
+        def __init__(self):
+            self.chars = [' '] + [chr(ord('a') + i) for i in range(26)] + ["'"]
+            self.blank_id = 0
+            self.char_to_id = {c: i + 1 for i, c in enumerate(self.chars)}
+            self.id_to_char = {i + 1: c for i, c in enumerate(self.chars)}
+            self.vocab_size = len(self.chars) + 1
+        def normalize(self, text: str) -> str:
+            text = text.lower()
+            out = []
+            for ch in text:
+                if ch in self.char_to_id:
+                    out.append(ch)
+                elif ch == '’':
+                    out.append("'")
+                elif ch == '\n':
+                    out.append(' ')
+            return ''.join(out)
+        def encode(self, text: str):
+            t = self.normalize(text)
+            return [self.char_to_id[ch] for ch in t]
 
 
 # Dataset Configuration Constants
