@@ -1,9 +1,40 @@
 #!/usr/bin/env python3
+"""
+RNN-T Training Metrics Summarization Tool for Performance Analysis
+
+This script provides comprehensive analysis of RNN-T training CSV logs generated
+by train_RNNT.py, extracting key performance metrics and computing statistical
+summaries for training optimization and regression detection on Apple Silicon.
+
+Key Responsibilities:
+- CSV parsing: Extract training metrics from structured log files
+- Statistical analysis: Compute averages and trends for performance assessment
+- Backend analysis: Track MPS/CPU backend usage for optimization guidance
+- Alignment analysis: Monitor RNN-T alignment computation performance
+
+Training Metrics Analyzed:
+- Loss values: Training loss progression for convergence assessment
+- Alignment counts: RNN-T alignment computation complexity metrics
+- Capacity metrics: t_cap and u_cap for alignment matrix sizing analysis
+- Backend usage: MPS vs CPU backend utilization tracking
+
+Called By:
+- Training analysis workflows requiring performance metric extraction
+- CI/CD pipelines for automated training performance validation
+- Development workflows for manual training optimization analysis
+- Research experiments requiring systematic metric comparison
+
+Performance Analysis Context:
+- Apple Silicon: MPS backend utilization and performance characteristics
+- Training efficiency: Loss convergence and alignment computation optimization
+- Resource usage: Memory and compute capacity analysis for model scaling
+- Backend selection: Optimal backend choice validation for different operations
+"""
 import csv
 import os
 import sys
 from statistics import mean
-from typing import List
+from typing import List, Optional, Dict, Any
 
 
 def summarize_csv(path: str) -> str:
