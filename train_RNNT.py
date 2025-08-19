@@ -1035,6 +1035,23 @@ def main():
                                 log_probs, t_tokens, t_out_lens, t_tok_lens, blank=0, clamp=-1, reduction="mean"
                             )
                             backend_used = "ta" if rnnt_backend == "torchaudio" else "warp"
+                            # If the returned loss is not connected to the graph (common when backend runs on CPU),
+                            # fall back to CPU-grad mapping to inject gradients explicitly.
+                            if not getattr(loss, "requires_grad", False):
+                                print("RNN-T backend returned a non-differentiable loss; injecting CPU-grad fallback.")
+                                loss_cpu, grad_logits = _rnnt_loss_cpu_with_grad(rnnt_loss, logits.detach(), tokens, out_lens, token_lens, blank=0)
+                                optimizer.zero_grad(set_to_none=True)
+                                logits.backward(grad_logits)
+                                optimizer.step()
+                                loss = loss_cpu
+                                backend_used = "cpu_grad"
+                                if csv_writer is not None:
+                                    csv_writer.writerow([epoch, step, float(loss.item()), t_cap, u_cap, align_size, backend_used, 1])
+                                align_values.append(align_size)
+                                t_caps.append(t_cap)
+                                u_caps.append(u_cap)
+                                backend_use_counts[backend_used] = backend_use_counts.get(backend_used, 0) + 1
+                                continue
                         except Exception as e:
                             # Safe CPU fallback with gradients via manual backward on CPU logits
                             print(f"RNN-T backend failed on-device ({e}); computing RNNT on CPU per-sample with grad mapping.")

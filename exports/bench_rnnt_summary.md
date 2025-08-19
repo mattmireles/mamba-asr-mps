@@ -1,10 +1,10 @@
-# RNNT Bench Summary (2025-08-18T11:27:19)
+# RNNT Bench Summary (2025-08-18T16:38:20)
 
 Steps: 60, Batch: 2
 
 | impl | fps | align_p50 | align_p90 | backend_usage |
 |---|---:|---:|---:|---|
-| mps_native | 819.5 | 4206.0 | 4881.6 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 0, 'cpu_grad': 4, 'unknown': 0} |
-| auto | 1130.4 | 4662.0 | 5472.0 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 0, 'cpu_grad': 4, 'unknown': 0} |
-| cpu_grad | 1124.6 | 3870.0 | 4721.2 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 0, 'cpu_grad': 4, 'unknown': 0} |
-| ctc | 1193.5 | 3620.0 | 4541.4 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 4, 'cpu_grad': 0, 'unknown': 0} |
+| mps_native | 1787.8 | 3847.5 | 5364.0 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 0, 'cpu_grad': 4, 'unknown': 0} |
+| auto | 1527.3 | 4710.0 | 5710.0 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 0, 'cpu_grad': 4, 'unknown': 0} |
+| cpu_grad | 1626.2 | 3381.0 | 4512.2 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 0, 'cpu_grad': 4, 'unknown': 0} |
+| ctc | 839.8 | 2514.5 | 4101.2 | {'ta': 0, 'warp': 0, 'naive': 0, 'ctc': 4, 'cpu_grad': 0, 'unknown': 0} |

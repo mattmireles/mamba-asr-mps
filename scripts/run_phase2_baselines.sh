@@ -34,6 +34,17 @@ if [[ -f "$LATCSV" ]]; then
     --csv "$LATCSV" \
     --out "$COREML_DIR/latency_summary.md" || true
   echo "Latency summary written to $COREML_DIR/latency_summary.md"
-else
-  echo "No latency CSV found at $LATCSV (run Swift runner to generate)."
+fi
+
+# Auto-embed latest latency summary into implementation plan (optional best-effort)
+PLAN_MD="$ROOT_DIR/README/implementation-plan-v2.md"
+if [[ -f "$COREML_DIR/latency_summary.md" && -f "$PLAN_MD" ]]; then
+  echo "\nAppending latest latency summary into plan..."
+  {
+    echo "\nLatest streaming latency summary:";
+    echo;
+    echo '```text';
+    cat "$COREML_DIR/latency_summary.md";
+    echo '```';
+  } >> "$PLAN_MD" || true
 fi

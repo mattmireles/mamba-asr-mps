@@ -103,7 +103,7 @@ class CoreMLConstants:
     """
     
     # Model Configuration
-    DEFAULT_CHUNK_LENGTH = 256      # Audio chunk length for streaming (frames)
+    DEFAULT_CHUNK_LENGTH = int(os.environ.get("MAMBA_CHUNK_DEFAULT", "256"))      # Audio chunk length for streaming (frames)
     DEFAULT_FEATURE_DIM = 80        # Mel-spectrogram feature dimension
     DEFAULT_MODEL_DIM = 256         # MCT model hidden dimension
     DEFAULT_STATE_DIM = 16          # Mamba state space dimension
@@ -162,7 +162,7 @@ def export_to_coreml(
     backend: str = "mlprogram",  # or "neuralnetwork"
     use_fp16: bool = False,
     use_w8: bool = False,
-    compute_units: str = "all",   # all | cpu | cpu-gpu | cpu-ne
+    compute_units: str = "cpu",   # all | cpu | cpu-gpu | cpu-ne (CPU-first by default)
     export_no_rnn: bool = False,
 ):
     """Convert optimized PyTorch MCT model to stateful Core ML package for ANE deployment.
@@ -351,7 +351,7 @@ if __name__ == "__main__":
     ap.add_argument("--backend", type=str, default="mlprogram", choices=["mlprogram","neuralnetwork"], help="Core ML backend format")
     ap.add_argument("--fp16", action="store_true", help="Attempt FP16 precision for ANE-friendlier execution")
     ap.add_argument("--w8", action="store_true", help="Apply 8-bit weight quantization post-conversion")
-    ap.add_argument("--compute-units", type=str, default="all", choices=["all","cpu","cpu-gpu","cpu-ne"], help="Preferred compute units during conversion")
+    ap.add_argument("--compute-units", type=str, default="cpu", choices=["all","cpu","cpu-gpu","cpu-ne"], help="Preferred compute units during conversion (CPU-first default)")
     ap.add_argument("--export-no-rnn", action="store_true", help="Use export-friendly MLP predictor to avoid RNN ops on ANE")
     args = ap.parse_args()
 

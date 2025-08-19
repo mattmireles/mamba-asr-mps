@@ -1,16 +1,16 @@
 {
-  "encoder_fps": 1130.3940200424177,
+  "encoder_fps": 1527.2813134689181,
   "align_count": 4,
-  "align_p50": 4662.0,
-  "align_p90": 5472.0,
-  "align_p99": 5574.6,
-  "align_max": 5586,
-  "Tcap_p50": 139.5,
-  "Tcap_p90": 145.5,
-  "Tcap_max": 147,
-  "Ucap_p50": 34.0,
-  "Ucap_p90": 38.0,
-  "Ucap_max": 38,
+  "align_p50": 4710.0,
+  "align_p90": 5710.0,
+  "align_p99": 5899.0,
+  "align_max": 5920,
+  "Tcap_p50": 142.5,
+  "Tcap_p90": 147.1,
+  "Tcap_max": 148,
+  "Ucap_p50": 33.0,
+  "Ucap_p90": 38.8,
+  "Ucap_max": 40,
   "backend_usage": {
     "ta": 0,
     "warp": 0,
@@ -41,6 +41,7 @@
     "skip_non_finite": false,
     "log_csv": "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/exports/bench_auto_60.csv",
     "log_json": "/Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/exports/bench_auto_60.summary.json",
-    "save_ckpt": ""
+    "save_ckpt": "",
+    "adaptive_ctc_after_cpu_grad": 0
   }
 }

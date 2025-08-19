@@ -37,6 +37,12 @@ def select_best_backend():
         return warp_rnnt_loss, "warp_rnnt"
     except Exception:
         pass
+    # Last resort: torchaudio.functional (deprecated but still widely available)
+    try:
+        from torchaudio.functional import rnnt_loss as ta_rnnt_loss_fn  # type: ignore
+        return ta_rnnt_loss_fn, "torchaudio"
+    except Exception:
+        pass
     return None, "none"
 
 
@@ -138,6 +144,11 @@ def rnnt_loss_mps(logits: torch.Tensor, tokens_with_blank: torch.Tensor, out_len
                 lp = lp[:, :, : min(Ucap, Ubatch), :]
 
         loss = rnnt_fn(lp, t_tokens, t_out, t_tok, blank=blank, clamp=-1, reduction="mean")
+        # If backend produced a scalar that is not connected to logits (common when CPU op without autograd bridge),
+        # compute CPU-grad explicitly so the caller can inject gradients.
+        if not getattr(loss, "requires_grad", False):
+            loss_cpu, grad_logits = _cpu_grad_fallback(rnnt_fn, logits.detach(), tokens_with_blank, out_lens, token_lens_with_blank, blank=blank)
+            return loss_cpu, grad_logits, "cpu_grad"
         return loss, None, backend
     except Exception:
         # CPU-grad fallback with explicit gradients

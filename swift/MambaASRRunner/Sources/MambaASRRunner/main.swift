@@ -1124,18 +1124,19 @@ func runOnce(model: MLModel) throws {
     let hop = 160
     let win = 400
     let nfft = 512
-    let totalSamples = (MambaASRConstants.chunkLength - 1) * hop + win
+    let Tprobe = chunkLengthOverride ?? MambaASRConstants.chunkLength
+    let totalSamples = (Tprobe - 1) * hop + win
     let signal = generateSyntheticAudio(sampleRate: sampleRate, samples: totalSamples)
-    let mel = computeLogMelSpectrogram(signal: signal, sampleRate: sampleRate, nFFT: nfft, winLength: win, hopLength: hop, numMels: MambaASRConstants.featureDimension, numFrames: MambaASRConstants.chunkLength)
+    let mel = computeLogMelSpectrogram(signal: signal, sampleRate: sampleRate, nFFT: nfft, winLength: win, hopLength: hop, numMels: MambaASRConstants.featureDimension, numFrames: Tprobe)
     let audioChunk = try MLMultiArray(
         shape: [
             NSNumber(value: MambaASRConstants.batchSize),
-            NSNumber(value: MambaASRConstants.chunkLength),
+            NSNumber(value: Tprobe),
             NSNumber(value: MambaASRConstants.featureDimension)
         ],
         dataType: MambaASRConstants.audioDataType
     )
-    for t in 0..<MambaASRConstants.chunkLength {
+    for t in 0..<Tprobe {
         for m in 0..<MambaASRConstants.featureDimension {
             let linearIndex = t * MambaASRConstants.featureDimension + m
             audioChunk[linearIndex] = NSNumber(value: mel[linearIndex])
@@ -1279,18 +1280,17 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
             MambaASRConstants.tokenInputName: tokenInput,
             MambaASRConstants.hiddenInputName: hiddenInput
         ]
-        let t0 = CFAbsoluteTimeGetCurrent()
         print("CoreML: prediction start")
 
+        // Time ONLY the Core ML prediction call (exclude prints/signpost overhead)
         let signpostID = mlSignposter.makeSignpostID()
         let predictionState = mlSignposter.beginInterval("StreamingPrediction", id: signpostID, "Chunk: \(chunkId)")
-
+        let t0 = CFAbsoluteTimeGetCurrent()
         let out = try model.prediction(from: MLDictionaryFeatureProvider(dictionary: inputs))
-
+        let t1 = CFAbsoluteTimeGetCurrent()
         mlSignposter.endInterval("StreamingPrediction", predictionState)
 
         print("CoreML: prediction end")
-        let t1 = CFAbsoluteTimeGetCurrent()
         let ms = (t1 - t0) * 1000.0
         latenciesMs.append(ms)
         guard let logits = out.featureValue(for: MambaASRConstants.logitsOutputName)?.multiArrayValue,
@@ -1434,8 +1434,9 @@ var beamList: [Int]? = nil
 var benchTopK: Int = 0
 var benchVocab: Int = 0
 var benchIters: Int = 0
-var computeMode: String = "all"  // all | cpu | cpu-gpu
+var computeMode: String = ProcessInfo.processInfo.environment["MAMBA_COMPUTE_DEFAULT"]?.lowercased() ?? "cpu"  // all | cpu | cpu-gpu
 var useAMXBeam: Bool = false
+var chunkLengthOverride: Int? = nil
 
 // Primitive flag parsing: --mlpackage, --mlmodelc, --wav, --stream, --duration <sec>
 var i = 1
@@ -1479,6 +1480,8 @@ while i < commandLineArguments.count {
         if i + 1 < commandLineArguments.count { benchIters = max(0, Int(commandLineArguments[i+1]) ?? 0); i += 1 }
     case "--compute":
         if i + 1 < commandLineArguments.count { computeMode = commandLineArguments[i+1].lowercased(); i += 1 }
+    case "--chunk":
+        if i + 1 < commandLineArguments.count { chunkLengthOverride = Int(commandLineArguments[i+1]); i += 1 }
     case "--beam-amx":
         useAMXBeam = true
     default:

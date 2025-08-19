@@ -111,6 +111,31 @@ These notes capture concrete issues, fixes, and heuristics discovered while trai
       --out Mamba-ASR-MPS/exports/CoreMLTraces/mps_intervals_summary.md
     ```
 
+#### Graph-level rewrites (today)
+- Rationale: CPU-only Core ML path is fastest for this model. Simplify PyTorch graphs to ops that Core ML maps efficiently on CPU.
+- Selective scan inner product: replaced `torch.einsum("bdn,bn->bd", hidden_state, C_timestep)` with batched matmul to improve CPU perf and export friendliness.
+  - New code: `y_timestep = torch.bmm(hidden_state, C_timestep.unsqueeze(-1)).squeeze(-1)`
+  - Location: `modules/mamba/selective_scan_interface.py` inside `ss_time_loop`.
+  - Result: Numerically identical; removes einsum; exported successfully to `.mlpackage`.
+- Gather usage: Core ML warns that embedding/gather only supports weights+indices. Audit dynamic `gather` sites next; prefer slice/concat or embedding where applicable. (Planned)
+- RNNT stability: torchaudio RNNT remains CPU-only on MPS; our facade forces CPU-grad mapping when needed. This keeps training moving but confirms RNNT is tactical; encoder optimization + CTC fallback remain strategic.
+- Export check: ensure `PYTHONPATH` includes `Mamba-ASR-MPS` when invoking exporter.
+  ```bash
+  PYTHONPATH="$(pwd)/Mamba-ASR-MPS" \
+  python Mamba-ASR-MPS/scripts/export_coreml.py \
+    --output Mamba-ASR-MPS/exports/MambaASR_opt.mlpackage
+  ```
+- Reporting: use `scripts/report_phase3.sh` to sweep compute modes/chunks and auto-append latency summaries to the plan. Focus on the `cpu` column for regression tracking.
+
+#### CPU chunk-size sweep (today)
+- Base compiled model (`Compiled_fp16_w8`), CPU-only, chunks=[128,256,512]
+  - 128: avg 4.844 ms; 256: avg 4.465 ms; 512: avg 6.740 ms
+  - Tail grows at 512 (p90≈10.28 ms). Keep default chunk at 256.
+
+#### Runner/Exporter defaults (today)
+- Runner (`MambaASRRunner`) default compute now configurable via env `MAMBA_COMPUTE_DEFAULT` (default `cpu`).
+- Exporter (`scripts/export_coreml.py`) default chunk length configurable via env `MAMBA_CHUNK_DEFAULT` (default 256).
+
 #### Next actions
 - Tighten alignment cap further (e.g., 50–60k) and make per-sample U-capping the default in fast path.
 - Attempt `warp_rnnt` install with `--no-build-isolation`; evaluate stability vs. torchaudio on Apple Silicon.
@@ -185,6 +210,11 @@ cat Mamba-ASR-MPS/exports/bench_rnnt_summary.md
   - Auto-backend (dev-clean; 150 steps): torchaudio selected but per-batch length mismatches → CPU-grad mapping; throughput≈1927 fps; loss: 412.52 → 85.47 → 131.69 → 62.69; align p50≈3,757; backend=100% cpu_grad.
     - Artifacts: `logs/rnnt_auto_150_new.csv`, `checkpoints/rnnt_auto_150_new.pt`.
 - RNNT backend attempt: `pip install --no-build-isolation warp_rnnt` failed with "CPU version is not implemented" (expected). Staying with torchaudio + CPU-grad mapping path for stability on Apple Silicon.
+
+##### 2025-08-19 (resume)
+- Re-confirmed default `--max_align 60000` is appropriate for dev-clean slice; p50 align ~3.6k–4.0k, U<=40 under current caps.
+- Action: propagate manual timing (CFAbsoluteTimeGetCurrent) into `MambaASRRunner` for owned telemetry during streaming evals.
+- Next: run 10s streaming latency sweeps for KD/QAT/Pruned with `compute=cpu`, chunk=256; append CSVs under `exports/` and summarize here.
 
 ### Extended RNNT + Swift compute modes (today)
 - RNNT CPU-grad (dev-clean; 300 steps; forced): throughput≈2115 fps; loss 360.37 → 88.04 → 84.28 → 51.78; align p50≈3,642; T' p50≈126; U p50≈28; backend=100% cpu_grad.
@@ -359,6 +389,55 @@ swift/MambaASRRunner/.build/release/MambaASRRunner \
 ```
 Result: success; shapes `logits_time=[1,64,1,1024]`, `predictor_hidden_out=[1,1,256]`. Streaming heartbeat: last-step argmax per chunk.
 
+##### 2025-08-19 CPU streaming latency (chunk=256, warmup=2, duration=10s, compute=cpu)
+- Commands:
+  - `Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner --mlpackage Mamba-ASR-MPS/exports/MambaASR_opt.mlpackage --stream --duration 10 --warmup 2 --compute cpu --latency-csv Mamba-ASR-MPS/exports/latency_cpu_c256_opt.csv`
+  - `Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner --mlpackage Mamba-ASR-MPS/exports/MambaASR_opt2.mlpackage --stream --duration 10 --warmup 2 --compute cpu --latency-csv Mamba-ASR-MPS/exports/latency_cpu_c256_opt2.csv`
+  - `Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner --mlpackage Mamba-ASR-MPS/exports/MambaASR_opt_w8.mlpackage --stream --duration 10 --warmup 2 --compute cpu --latency-csv Mamba-ASR-MPS/exports/latency_cpu_c256_w8.csv`
+- Results:
+  - opt: avg≈4.17 ms; p50≈4.11; p90≈4.23; n=4 → `exports/latency_cpu_c256_opt.csv`
+  - opt2: avg≈4.11 ms; p50≈4.10; p90≈4.17; n=4 → `exports/latency_cpu_c256_opt2.csv`
+  - w8: avg≈4.15 ms; p50≈3.94; p90≈4.31; n=4 → `exports/latency_cpu_c256_w8.csv`
+  - kd: avg≈3.30 ms; p50≈3.15; p90≈3.47; n=4 → `exports/latency_cpu_c256_kd.csv`
+  - qat: avg≈3.65 ms; p50≈3.47; p90≈3.78; n=4 → `exports/latency_cpu_c256_qat.csv`
+  - pruned: avg≈3.37 ms; p50≈3.39; p90≈3.39; n=4 → `exports/latency_cpu_c256_pruned.csv`
+
+##### 2025-08-19 CPU chunk-size sweep (c=128,256,512; 10s; warmup=2)
+- opt: c128≈4.30 → `exports/latency_cpu_c128_opt.csv`; c256≈4.17; c512≈4.06 → `exports/latency_cpu_c512_opt.csv`
+- opt2: c128≈4.22 → `exports/latency_cpu_c128_opt2.csv`; c256≈4.11; c512≈4.12 → `exports/latency_cpu_c512_opt2.csv`
+- w8: c128≈4.29 → `exports/latency_cpu_c128_w8.csv`; c256≈4.15; c512≈4.21 → `exports/latency_cpu_c512_w8.csv`
+- kd: c128≈3.36 → `exports/latency_cpu_c128_kd.csv`; c256≈3.30; c512≈3.43 → `exports/latency_cpu_c512_kd.csv`
+- qat: c128≈3.09 → `exports/latency_cpu_c128_qat.csv`; c256≈3.65; c512≈3.32 → `exports/latency_cpu_c512_qat.csv`
+- pruned: c128≈3.43 → `exports/latency_cpu_c128_pruned.csv`; c256≈3.37; c512≈3.25 → `exports/latency_cpu_c512_pruned.csv`
+
+##### 2025-08-19 Real-audio latency + transcript sanity (QAT)
+- Greedy (beam=1), CPU, chunk=256: avg≈3.62 ms; n=8 → `exports/latency_cpu_c256_qat_real.csv`
+- Beam=3, CPU, chunk=256: avg≈3.34 ms; n=8 → `exports/latency_cpu_c256_qat_real_beam3.csv`
+- Vocab: temporary `exports/vocab.json` (a–z cycling placeholder) used for transcript visualization.
+
+##### 2025-08-19 Real-audio latency + transcript sanity (KD/Pruned)
+- KD: greedy avg≈(see CSV) → `exports/latency_cpu_c256_kd_real.csv`; beam=3 → `exports/latency_cpu_c256_kd_real_beam3.csv`
+- Pruned: greedy avg≈(see CSV) → `exports/latency_cpu_c256_pruned_real.csv`; beam=3 → `exports/latency_cpu_c256_pruned_real_beam3.csv`
+- Transcripts captured to:
+  - KD: `exports/transcript_kd_greedy.txt`, `exports/transcript_kd_beam3.txt`
+  - Pruned: `exports/transcript_pruned_greedy.txt`, `exports/transcript_pruned_beam3.txt`
+
+##### 2025-08-19 ALL/CPU-GPU streaming latency (chunk=256, warmup=2, duration=10s)
+- all:
+  - opt: avg≈19.68 ms; p50≈19.35; p90≈19.52; n=4 → `exports/latency_all_c256_opt.csv`
+  - opt2: avg≈18.76 ms; p50≈18.61; p90≈18.89; n=4 → `exports/latency_all_c256_opt2.csv`
+  - w8: avg≈18.56 ms; p50≈18.36; p90≈18.75; n=4 → `exports/latency_all_c256_w8.csv`
+  - kd: avg≈23.84 ms; p50≈15.20; p90≈19.43; n=4 → `exports/latency_all_c256_kd.csv`
+  - qat: avg≈26.54 ms; p50≈24.94; p90≈30.11; n=4 → `exports/latency_all_c256_qat.csv`
+  - pruned: avg≈20.57 ms; p50≈14.88; p90≈17.17; n=4 → `exports/latency_all_c256_pruned.csv`
+- cpu-gpu:
+  - opt: avg≈18.63 ms; p50≈18.57; p90≈18.83; n=4 → `exports/latency_cpu-gpu_c256_opt.csv`
+  - opt2: avg≈19.68 ms; p50≈19.69; p90≈19.72; n=4 → `exports/latency_cpu-gpu_c256_opt2.csv`
+  - w8: avg≈18.69 ms; p50≈18.49; p90≈18.93; n=4 → `exports/latency_cpu-gpu_c256_w8.csv`
+  - kd: avg≈15.70 ms; p50≈15.78; p90≈16.02; n=4 → `exports/latency_cpu-gpu_c256_kd.csv`
+  - qat: avg≈21.48 ms; p50≈15.94; p90≈16.90; n=4 → `exports/latency_cpu-gpu_c256_qat.csv`
+  - pruned: avg≈22.73 ms; p50≈14.55; p90≈29.81; n=4 → `exports/latency_cpu-gpu_c256_pruned.csv`
+
 - Phase 3 short passes with saving:
 ```bash
 python Mamba-ASR-MPS/scripts/optimize.py --technique kd \
@@ -376,3 +455,4 @@ python Mamba-ASR-MPS/scripts/optimize.py --technique prune \
   --steps 50 --batch_size 2 \
   --save_model Mamba-ASR-MPS/checkpoints/pruned_model.pt
 ```
+\n- Ran latency sweep (modes=all,cpu,cpu-gpu, chunks=256). See exports/CoreMLTraces/latency_sweep.md

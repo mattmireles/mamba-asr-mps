@@ -191,7 +191,13 @@ def selective_scan(
             for timestep in range(seq_len):
                 hidden_state = delta_A[:, timestep] * hidden_state + delta_B_u[:, timestep]
                 C_timestep = C_proj[:, timestep, :]  # (B, N)
-                y_timestep = torch.einsum("bdn,bn->bd", hidden_state, C_timestep)  # (B, D)
+                # Implementation switch for inner product: default to einsum.
+                # Set env MAMBA_EINSUM_IMPL=bmm to force batched matmul path.
+                if os.environ.get("MAMBA_EINSUM_IMPL", "einsum").lower() == "bmm":
+                    # Shapes: hidden_state (B, D, N) @ C_timestep.unsqueeze(-1) (B, N, 1) -> (B, D, 1)
+                    y_timestep = torch.bmm(hidden_state, C_timestep.unsqueeze(-1)).squeeze(-1)
+                else:
+                    y_timestep = torch.einsum("bdn,bn->bd", hidden_state, C_timestep)
                 output_timesteps.append(y_timestep)
 
         # Step 6: Combine outputs and apply residual connections
