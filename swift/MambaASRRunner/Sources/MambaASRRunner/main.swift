@@ -787,6 +787,52 @@ private func logSoftmax(_ logits: [Float]) -> [Float] {
     return out
 }
 
+/// Loads a projection matrix mapping model-vocab (V) to character-vocab (29) in log-space.
+///
+/// CSV format: V rows, 29 columns. Each value P[i][k] is interpreted as a log-weight that
+/// will be added to the frame log-probability lps[i] before log-sum-exp pooling into group k.
+///
+/// Computation: pooled[k] = logsumexp_i( lps[i] + P[i][k] ) for k in [0,28]
+///
+/// Notes for researchers:
+/// - This emulates a learned 1024→29 projection head post-export without modifying the model.
+/// - If your CSV contains linear weights instead of log-weights, convert with log() offline to
+///   preserve numerical stability (very small weights should map to large negative values).
+/// - Values of ~-20 effectively zero-out contributions (exp(-20) ≈ 2e-9).
+private func loadProjectionMatrix(csvPath: String, expectedV: Int, expectedK: Int = 29) -> [[Float]]? {
+    do {
+        let text = try String(contentsOfFile: csvPath)
+        let rows = text.split(whereSeparator: { $0 == "\n" || $0 == "\r\n" })
+        if rows.isEmpty { return nil }
+        var matrix: [[Float]] = []
+        matrix.reserveCapacity(min(expectedV, rows.count))
+        for (ri, row) in rows.enumerated() {
+            if ri >= expectedV { break }
+            let cols = row.split(separator: ",")
+            if cols.count < expectedK { return nil }
+            var outRow: [Float] = [Float](repeating: 0, count: expectedK)
+            var ok = true
+            for k in 0..<expectedK {
+                let tok = cols[k].trimmingCharacters(in: .whitespaces)
+                if tok == "inf" || tok == "+inf" { outRow[k] = Float.infinity; continue }
+                if tok == "-inf" { outRow[k] = -Float.infinity; continue }
+                if let v = Float(tok) {
+                    outRow[k] = v
+                } else {
+                    ok = false; break
+                }
+            }
+            if !ok { return nil }
+            matrix.append(outRow)
+        }
+        if matrix.count < expectedV { return nil }
+        return matrix
+    } catch {
+        print("[warn] Failed to load projection matrix: \(error)")
+        return nil
+    }
+}
+
 /// CTC beam search entry representing a partial token sequence with probability tracking.
 ///
 /// This structure maintains the essential state for CTC beam search decoding,
@@ -1210,7 +1256,8 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
     let win = 400
     let nfft = 512
     let numMels = MambaASRConstants.featureDimension
-    let Tchunk = MambaASRConstants.chunkLength
+    // Allow overriding chunk length via --chunk for short-audio tests
+    let Tchunk = chunkLengthOverride ?? MambaASRConstants.chunkLength
     // Load audio or synthesize enough chunks to satisfy durationSeconds (or 3 by default)
     let signal: [Float]
     if let path = wavPath, let wav = loadWavMono16k(path: path) {
@@ -1256,6 +1303,122 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
     // Initialize CTC beam state if enabled via --beam
     let useBeam = (beamWidth > 1)
     var beams: [CTCBeamEntry] = [CTCBeamEntry(tokens: [], pBlank: 0.0, pNonBlank: -Float.infinity)]
+
+    // Special handling for short utterances: pad to one chunk and run a single inference
+    if totalFrames > 0 && totalFrames < Tchunk {
+        // Slice entire signal window, compute mel with numFrames = totalFrames, then pad to Tchunk
+        let startSample = 0
+        let endSample = min(signal.count, startSample + (Tchunk - 1) * hop + win)
+        let slice = Array(signal[startSample..<endSample])
+        var mel = computeLogMelSpectrogram(
+            signal: slice,
+            sampleRate: sampleRate,
+            nFFT: nfft,
+            winLength: win,
+            hopLength: hop,
+            numMels: numMels,
+            numFrames: totalFrames
+        )
+        // Pad mel frames with zeros to reach Tchunk
+        mel.append(contentsOf: [Float](repeating: 0, count: (Tchunk - totalFrames) * numMels))
+
+        let audioChunk = try MLMultiArray(
+            shape: [1, NSNumber(value: Tchunk), NSNumber(value: numMels)],
+            dataType: MambaASRConstants.audioDataType
+        )
+        for t in 0..<Tchunk {
+            for m in 0..<numMels {
+                let idx = t * numMels + m
+                audioChunk[idx] = NSNumber(value: mel[idx])
+            }
+        }
+        let inputs: [String: Any] = [
+            MambaASRConstants.audioInputName: audioChunk,
+            MambaASRConstants.tokenInputName: tokenInput,
+            MambaASRConstants.hiddenInputName: hiddenInput
+        ]
+        let signpostID = mlSignposter.makeSignpostID()
+        let predictionState = mlSignposter.beginInterval("StreamingPrediction", id: signpostID, "Chunk: 0 (padded)")
+        let t0 = CFAbsoluteTimeGetCurrent()
+        let out = try model.prediction(from: MLDictionaryFeatureProvider(dictionary: inputs))
+        let t1 = CFAbsoluteTimeGetCurrent()
+        mlSignposter.endInterval("StreamingPrediction", predictionState)
+        let ms = (t1 - t0) * 1000.0
+        latenciesMs.append(ms)
+        guard let logits = out.featureValue(for: MambaASRConstants.logitsOutputName)?.multiArrayValue,
+              let hiddenOut = out.featureValue(for: MambaASRConstants.hiddenOutputName)?.multiArrayValue else {
+            print("[chunk 0] ❌ missing outputs")
+            return StreamingStats(avgMs: 0, p50Ms: 0, p90Ms: 0, count: 0)
+        }
+        if logits.shape.count == 4 {
+            let Tprime = logits.shape[1].intValue
+            let V = logits.shape[3].intValue
+            var frame = [Float]()
+            frame.reserveCapacity(V)
+            for t in 0..<Tprime {
+                frame.removeAll(keepingCapacity: true)
+                let base = t * V
+                for v in 0..<V { frame.append(logits[base + v].floatValue) }
+            if useBeam {
+                    let lps = logSoftmax(frame)
+                    if useAMXBeam {
+                        beams = ctcBeamUpdateAMXGlobal(
+                            beams: beams,
+                            frameLogProbs: lps,
+                            beamWidth: beamWidth,
+                            blankId: MambaASRConstants.blankTokenIndex,
+                            topKOverride: topKPerFrame,
+                            blankGateMargin: blankGateMargin
+                        )
+                    } else {
+                        beams = ctcBeamUpdate(
+                            beams: beams,
+                            frameLogProbs: lps,
+                            beamWidth: beamWidth,
+                            blankId: MambaASRConstants.blankTokenIndex,
+                            topKOverride: topKPerFrame,
+                            blankGateMargin: blankGateMargin
+                        )
+                    }
+                } else {
+                    var bestId = 0
+                    var bestVal = -Float.greatestFiniteMagnitude
+                    for v in 0..<V {
+                        let val = frame[v]
+                        if val > bestVal { bestVal = val; bestId = v }
+                    }
+                    collectedIds.append(bestId)
+                }
+            }
+        }
+        // Decode transcript if vocab provided
+        if let vocabPath = vocabPath, !vocabPath.isEmpty {
+            let vocab = loadVocab(from: vocabPath)
+            let finalIds: [Int] = useBeam ? (beams.max(by: { $0.score < $1.score })?.tokens ?? []) : greedyCollapse(ids: collectedIds, blankId: MambaASRConstants.blankTokenIndex)
+            var text = ""
+            for id in finalIds { if let ch = vocab[id] { text.append(contentsOf: ch) } }
+            if !text.isEmpty {
+                let mode = useBeam ? "Beam" : "Greedy"
+                print("📝 \(mode) transcript: \(text)")
+            } else {
+                // Fallback: build best-effort text from raw collected ids (non-collapsed)
+                var fallback = ""
+                var appended = 0
+                for gid in collectedIds {
+                    if gid == MambaASRConstants.blankTokenIndex { continue }
+                    if let ch = vocab[gid] {
+                        fallback.append(contentsOf: ch)
+                        appended += 1
+                        if appended >= 128 { break }
+                    }
+                }
+                print("📝 Greedy transcript: \(fallback)")
+            }
+        }
+        print(String(format: "⏱️ per-chunk latency: avg=%.2f ms, p50=%.2f ms, p90=%.2f ms (n=%d)", ms, ms, ms, 1))
+        print("✅ Streaming loop completed: processed 1 chunk(s)")
+        return StreamingStats(avgMs: ms, p50Ms: ms, p90Ms: ms, count: 1)
+    }
     while frameIndex + Tchunk <= totalFrames {
         if durationSeconds > 0 {
             let elapsed = Date().timeIntervalSince(startTime)
@@ -1332,14 +1495,108 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
                         )
                     }
                 } else {
-                    // Greedy per-frame argmax for CTC-like collapse later
-                    var bestId = 0
-                    var bestVal = -Float.greatestFiniteMagnitude
-                    for v in 0..<V {
-                        let val = frame[v]
-                        if val > bestVal { bestVal = val; bestId = v }
+                    // Optional pooled-greedy: map 1024-vocab → 29 character groups via log-sum-exp
+                    if let _ = restrictVocabCap, restrictVocabCap == 29 {
+                        let lps = logSoftmax(frame)
+                        var pooled = [Float](repeating: -Float.greatestFiniteMagnitude, count: 29)
+                        var usedProjection = false
+                        if let projPath = projectionMatrixPath, !projPath.isEmpty {
+                            if let P = loadProjectionMatrix(csvPath: projPath, expectedV: V, expectedK: 29) {
+                                // pooled[k] = logsumexp_i ( lps[i] + P[i][k] )
+                                // Compute per group with two-pass stable log-sum-exp
+                                var maxPerGroup = [Float](repeating: -Float.greatestFiniteMagnitude, count: 29)
+                                for i in 0..<V {
+                                    let li = lps[i]
+                                    let row = P[i]
+                                    for k in 0..<29 {
+                                        let val = li + row[k]
+                                        if val > maxPerGroup[k] { maxPerGroup[k] = val }
+                                    }
+                                }
+                                for k in 0..<29 {
+                                    let m = maxPerGroup[k]
+                                    if !m.isFinite { continue }
+                                    var sumExp: Float = 0
+                                    for i in 0..<V {
+                                        let val = lps[i] + P[i][k]
+                                        sumExp += expf(val - m)
+                                    }
+                                    pooled[k] = m + logf(max(sumExp, 1e-30))
+                                }
+                                usedProjection = true
+                            }
+                        }
+                        if !usedProjection {
+                            // Fallback: modulo group pooling (heuristic)
+                            var maxPerGroup = [Float](repeating: -Float.greatestFiniteMagnitude, count: 29)
+                            for id in 0..<V {
+                                let g = (id == 0) ? 0 : (id % 29)
+                                let v = lps[id]
+                                if v > maxPerGroup[g] { maxPerGroup[g] = v }
+                            }
+                            for g in 0..<29 {
+                                let m = maxPerGroup[g]
+                                if !m.isFinite { continue }
+                                var sumExp: Float = 0
+                                for id in 0..<V {
+                                    let gi = (id == 0) ? 0 : (id % 29)
+                                    if gi == g { sumExp += expf(lps[id] - m) }
+                                }
+                                pooled[g] = m + logf(max(sumExp, 1e-30))
+                            }
+                        }
+                        // Argmax pooled groups with optional blank gating in greedy mode
+                        var bestG = 0
+                        var bestVal = -Float.greatestFiniteMagnitude
+                        var secondG = 0
+                        var secondVal = -Float.greatestFiniteMagnitude
+                        for g in 0..<29 {
+                            let v = pooled[g]
+                            if v > bestVal {
+                                secondVal = bestVal; secondG = bestG
+                                bestVal = v; bestG = g
+                            } else if v > secondVal {
+                                secondVal = v; secondG = g
+                            }
+                        }
+                        if bestG == 0, let margin = blankGateMargin, margin > 0 {
+                            // If blank wins but a non-blank is close (within margin), emit the non-blank
+                            if secondG != 0 && (bestVal - secondVal) <= margin { collectedIds.append(secondG) }
+                            else { collectedIds.append(bestG) }
+                        } else {
+                            collectedIds.append(bestG)
+                        }
+                    } else {
+                        // Standard greedy over full vocab for CTC-like collapse later
+                        var bestId = 0
+                        var bestVal = -Float.greatestFiniteMagnitude
+                        for v in 0..<V {
+                            let val = frame[v]
+                            if val > bestVal { bestVal = val; bestId = v }
+                        }
+                        if let cap = restrictVocabCap, cap == 29, projectMod29 {
+                            // Project argmax id to 29-group with optional blank gating
+                            let g = (bestId == 0) ? 0 : (bestId % 29)
+                            if g == 0, let margin = blankGateMargin, margin > 0 {
+                                // Find best non-blank v within margin of bestId's value
+                                var bestNonBlankG = 0
+                                var bestNonBlankVal = -Float.greatestFiniteMagnitude
+                                for v in 1..<V {
+                                    let val = frame[v]
+                                    if val > bestNonBlankVal { bestNonBlankVal = val; bestNonBlankG = (v % 29) }
+                                }
+                                if (frame[bestId] - bestNonBlankVal) <= margin && bestNonBlankG != 0 {
+                                    collectedIds.append(bestNonBlankG)
+                                } else {
+                                    collectedIds.append(g)
+                                }
+                            } else {
+                                collectedIds.append(g)
+                            }
+                        } else {
+                            collectedIds.append(bestId)
+                        }
                     }
-                    collectedIds.append(bestId)
                 }
             }
             // Log heartbeat: last token id (greedy) or top beam score
@@ -1395,11 +1652,29 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
         }
         var text = ""
         for id in finalIds { if let ch = vocab[id] { text.append(contentsOf: ch) } }
+        if let cap = restrictVocabCap, cap > 0 {
+            // Rebuild text restricting ids to < cap
+            var filtered = ""
+            for id in finalIds where id < cap { if let ch = vocab[id] { filtered.append(contentsOf: ch) } }
+            text = filtered
+        }
         if !text.isEmpty {
             let mode = useBeam ? "Beam" : "Greedy"
             print("📝 \(mode) transcript: \(text)")
         } else {
-            print("📝 Transcript (ids): \(finalIds.prefix(64))… (len=\(finalIds.count))")
+            // Fallback: best-effort from raw collected ids
+            var fallback = ""
+            var appended = 0
+            for gid in collectedIds {
+                if gid == MambaASRConstants.blankTokenIndex { continue }
+                if let ch = vocab[gid] {
+                    fallback.append(contentsOf: ch)
+                    appended += 1
+                    if appended >= 512 { break }
+                }
+            }
+            let mode = useBeam ? "Beam" : "Greedy"
+            print("📝 \(mode) transcript: \(fallback)")
         }
     }
     print("✅ Streaming loop completed: processed \(chunkId) chunk(s)")
@@ -1437,6 +1712,9 @@ var benchIters: Int = 0
 var computeMode: String = ProcessInfo.processInfo.environment["MAMBA_COMPUTE_DEFAULT"]?.lowercased() ?? "cpu"  // all | cpu | cpu-gpu
 var useAMXBeam: Bool = false
 var chunkLengthOverride: Int? = nil
+var restrictVocabCap: Int? = nil  // If set, restrict decoding to ids < cap
+var projectMod29: Bool = false     // If true with restrict 29, project argmax id % 29
+var projectionMatrixPath: String? = nil // If provided, use 1024x29 proj for pooled decode
 
 // Primitive flag parsing: --mlpackage, --mlmodelc, --wav, --stream, --duration <sec>
 var i = 1
@@ -1484,6 +1762,12 @@ while i < commandLineArguments.count {
         if i + 1 < commandLineArguments.count { chunkLengthOverride = Int(commandLineArguments[i+1]); i += 1 }
     case "--beam-amx":
         useAMXBeam = true
+    case "--restrict-vocab":
+        if i + 1 < commandLineArguments.count { restrictVocabCap = Int(commandLineArguments[i+1]); i += 1 }
+    case "--project-mod29":
+        projectMod29 = true
+    case "--proj-matrix":
+        if i + 1 < commandLineArguments.count { projectionMatrixPath = commandLineArguments[i+1]; i += 1 }
     default:
         // Backward compatibility: allow positional paths
         if mlpackagePath == MambaASRConstants.defaultMLPackagePath {

@@ -331,6 +331,42 @@ See aggregate overview: `exports/CoreMLTraces/latency_overview.md` (auto-generat
 - Real-audio runs evaluated vs `exports/reference_10s.txt`:
   - Report: `exports/CoreMLTraces/wer_cer_overview.md` (greedy vs beam=3 for KD/QAT/Pruned)
   - Note: Current reference is placeholder; update with ground-truth to get meaningful CER/WER.
+
+### 2025-08-19 Decoding remediation toward solid WER
+
+- Problem: All models produced empty/garbage transcripts; WER/CER = 1.000. Root cause is vocab mismatch: exported models emit V=1024 logits while our intended decoding is a 29-char space (blank, space, a-z, '). A naive modulo mapping is incorrect.
+- Actions implemented in `swift/MambaASRRunner`:
+  - Short-audio path: if total frames < 256, pad mel features to one 256-frame chunk and run a single pass.
+  - Decoding flags:
+    - `--restrict-vocab 29` and `--project-mod29`: project 1024-class argmax into 29-char groups (0→blank, 1..28 map via id % 29).
+    - Pooled-greedy: log-sum-exp pool 1024 logits into 29 groups per frame; optional `--blank-gate <margin>` to avoid all-blank dominance.
+    - `--proj-matrix <csv>` stub: future 1024→29 learned projection support.
+  - Result: transcripts now contain character-like strings but accuracy remains poor (CER ~0.86–0.89; WER 1.000 on a repeated "hello world" sample). This confirms the need for a proper 29-vocab model or a learned 1024→29 projection.
+- Next steps:
+  - Proper fix: re-export Core ML with `vocab_size=29` end-to-end and re-evaluate CER/WER.
+  - Interim: implement a real 1024×29 projection layer (loaded from CSV) in the runner to emulate a char head over current logits.
+
+### 2025-08-19 Projection CSV implemented in runner (Step 1/7)
+
+- Implemented `loadProjectionMatrix()` in `swift/MambaASRRunner/Sources/MambaASRRunner/main.swift` and wired pooled-greedy to use it when `--restrict-vocab 29` and `--proj-matrix <csv>` are provided.
+- Math: pooled[k] = logsumexp_i( lps[i] + P[i,k] ), where lps is frame log-softmax over 1024 and P is a V×29 log-weight matrix. Falls back to modulo pooling if CSV missing/invalid.
+- Added sample file stub at `exports/projection_1024x29.sample.csv` (documentation header; to be replaced with learned weights).
+- Added batch eval script `scripts/eval_batch.sh` to run greedy over a small testset and compute CER-only gates via `scripts/compute_wer_cer.py`.
+- Next: populate a minimal `exports/testset/{audio,refs}` and run the batch eval with `--proj-matrix` to validate the path (Step 2/7).
+
+### 2025-08-19 Tiny eval harness scaffolded (Step 2/7)
+
+- Created `exports/testset/audio/hello_world_16k.wav` and `exports/testset/refs/hello_world_16k.txt` as seed sample.
+- Added `scripts/eval_batch.sh` runner; executed successfully (no outputs yet because projection CSV is a stub and transcript was empty on short clip). Verified short-utterance pad path triggers and latency remains low.
+- Next: generate ~9 more short WAVs + refs; then run batch eval and record CER-only overview (Step 3/7).
+
+Artifacts:
+- Short-audio tests: `exports/transcript_qat_greedy_hello_padded.txt`
+- Pooled/projection experiments: 
+  - `exports/transcript_qat_greedy_hello_long_restrict29_gate.txt` → CER≈0.890
+  - `exports/transcript_qat_greedy_hello_long_mod29_gate.txt` → CER≈0.860
+  - Reports: `exports/CoreMLTraces/wer_cer_hello_world_long_*.md`
+
 ## RNNT implementation benchmarks (latest)
 
 Source: `scripts/bench_rnnt_impls.py` (Steps=60, Batch=2)

@@ -33,6 +33,27 @@ These notes capture concrete issues, fixes, and heuristics discovered while trai
   - Extended benchmark to 8192 tokens on MPS shows stable/high throughput with mild variance; naive scan is not a bottleneck for short/medium chunks. Metal kernel de-prioritized.
   - Scripted report generator publishes `exports/bench_selective_scan.md` for archival.
 
+#### Decoding and evaluation (today)
+- Symptom: Core ML runner produced empty/garbage transcripts; WER/CER=1.000 across models.
+- Root cause: Vocabulary mismatch. Exported models output logits over V=1024, while our intended tokenizer is 29 chars (blank, space, a–z, apostrophe). A naive modulo mapping is incorrect, yielding meaningless text.
+- Remediations in `MambaASRRunner`:
+  - Short-audio path: pad <256-frame clips to exactly one 256-frame chunk and run a single inference to force a transcript.
+  - Pooled-greedy: log-sum-exp pool 1024 logits into 29 groups per frame; optional `--blank-gate` to avoid all-blank dominance.
+  - Projection options: `--project-mod29` (fast hack) and `--proj-matrix` (now implemented) to coerce 1024→29 via learned log-weights.
+    - New implementation: If `--restrict-vocab 29` and `--proj-matrix P.csv` are provided, pooled logits are computed as `pooled[k] = logsumexp_i(lps[i] + P[i,k])`.
+    - CSV expected as V×29 in log-space. Falls back to modulo pooling if CSV missing/invalid.
+    - Sample stub written to `exports/projection_1024x29.sample.csv` as documentation; replace with real weights.
+  - Result: Text-like outputs appear, but accuracy remains poor (CER ~0.86–0.89 on repeated "hello world"; WER=1.000). Confirms need for a proper 29-vocab model or a learned projection.
+- Metrics script updates: `scripts/compute_wer_cer.py` now normalizes text, computes CER character-level (spaces removed), supports `--cer-only`, thresholds, and `--strict` gating for CI.
+
+##### Batch eval (today)
+- Added `scripts/eval_batch.sh` to iterate over `exports/testset/audio/*.wav`, run greedy decode with `--restrict-vocab 29 --blank-gate 0.5 --proj-matrix`, and summarize CER via `scripts/compute_wer_cer.py --cer-only`.
+- Next: Populate `exports/testset/{audio,refs}` with ~10 short 16k mono WAVs plus refs; target CER < 0.6 as an initial gate until vocab-aligned models arrive.
+- Next for researchers:
+  - Preferred: retrain/export with `MCTConfig(vocab_size=29)` to align logits with tokenizer and decoding.
+  - Interim: add a learned 1024×29 projection head (post-export) or load a weight matrix into the Swift runner and compute y = log_softmax(W^T·softmax(x)). Expect improvement if W is derived from a trained head.
+  - Keep CER as primary gating metric until the vocab alignment is fixed; treat WER as informational.
+
 #### Concrete runs (latest)
 ##### Quick synthetic RNNT micro-benchmarks (sanity, bs=2)
 - 60-step comparison (exports/*.csv & *.summary.json):
