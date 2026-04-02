@@ -124,7 +124,8 @@ class EnvironmentConfig:
             "example": "export MAMBA_VOCAB_SIZE=29"
         },
         
-        # RNN-T Loss Configuration\n        "RNNT_MAX_ALIGN": {
+        # RNN-T Loss Configuration
+        "RNNT_MAX_ALIGN": {
             "type": int,
             "default": 60000,
             "min_value": 1000,

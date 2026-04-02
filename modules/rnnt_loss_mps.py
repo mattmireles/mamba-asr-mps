@@ -293,7 +293,8 @@ def rnnt_loss_mps(logits: torch.Tensor, tokens_with_blank: torch.Tensor, out_len
                 continue
             Ui_allowed = min(Ui_eff_i, max(1, MAX_ALIGN // max(1, Ti_eff_i)))
             allowed_Us.append(Ui_allowed)
-        Ubatch = min(allowed_Us) if allowed_Us else 0
+        non_zero_us = [u for u in allowed_Us if u > 0]
+        Ubatch = min(non_zero_us) if non_zero_us else 0
         if is_torchaudio:
             t_tokens = tokens_with_blank[:, 1:].to(torch.int32)  # exclude leading blank
             t_out = torch.clamp(out_lens.to(torch.int32), max=Tcap)

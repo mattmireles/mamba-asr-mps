@@ -300,15 +300,19 @@ class MLPStreamingPredictor(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        # Non-streaming path: process full sequence without using recurrence
+        # Batch path: unroll the Elman-style recurrence causally to match streaming
         # tokens: (B, U)
         B, U = tokens.shape
         emb = self.token_embedding(tokens)  # (B, U, E)
-        # Collapse along U with a simple projection (not used in training path)
-        combined = self.activation(self.comb_linear(
-            torch.cat([emb, torch.zeros(B, U, self.d_model, device=emb.device, dtype=emb.dtype)], dim=-1)
-        ))
-        out = self.norm(self.proj_out(combined))  # (B, U, D)
+        hidden = torch.zeros(B, self.d_model, device=emb.device, dtype=emb.dtype)
+        outputs = []
+        for u in range(U):
+            combined = self.activation(self.comb_linear(
+                torch.cat([emb[:, u, :], hidden], dim=-1)
+            ))
+            hidden = self.proj_out(combined)
+            outputs.append(hidden)
+        out = self.norm(torch.stack(outputs, dim=1))  # (B, U, D)
         return out
 
     def forward_streaming(

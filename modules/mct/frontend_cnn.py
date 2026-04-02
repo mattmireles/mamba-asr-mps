@@ -230,14 +230,22 @@ class FrontendCNN(nn.Module):
     
     def get_output_length(self, input_length: int) -> int:
         """Calculate output sequence length after frontend processing.
-        
+
+        Uses the actual Conv1d output formula: floor((L + 2*pad - kernel) / stride) + 1
+
         Args:
             input_length: Input sequence length
-            
+
         Returns:
-            Output sequence length after 4x subsampling
+            Output sequence length after frontend convolutions
         """
-        return input_length // FrontendConstants.TOTAL_SUBSAMPLING_FACTOR
+        # Stage 1: Conv1d(kernel=5, stride=2, pad=2)
+        length = (input_length + 2 * FrontendConstants.STAGE1_PADDING - FrontendConstants.STAGE1_KERNEL) // FrontendConstants.SUBSAMPLING_STRIDE + 1
+        # Stage 2: Conv1d(kernel=5, stride=2, pad=2)
+        length = (length + 2 * FrontendConstants.STAGE2_PADDING - FrontendConstants.STAGE2_KERNEL) // FrontendConstants.SUBSAMPLING_STRIDE + 1
+        # Stage 3: Conv1d(kernel=3, stride=1, pad=1) — preserves length
+        length = (length + 2 * FrontendConstants.STAGE3_PADDING - FrontendConstants.STAGE3_KERNEL) // FrontendConstants.REFINEMENT_STRIDE + 1
+        return length
     
     def get_frontend_info(self) -> str:
         """Return frontend configuration and performance information."""

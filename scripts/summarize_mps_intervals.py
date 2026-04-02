@@ -46,7 +46,7 @@ def percentile(data: List[float], p: float) -> float:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize MPS hardware intervals (XML)")
-    parser.add_argument("--xml", default="Mamba-ASR-MPS/exports/CoreMLTraces/mps_hw_intervals.xml")
+    parser.add_argument("--xml", default="exports/CoreMLTraces/mps_hw_intervals.xml")
     parser.add_argument("--out", default="", help="Optional markdown output path")
     args = parser.parse_args()
 
@@ -68,7 +68,9 @@ def main() -> None:
     print(f"count={count} total_ms={total_ms:.2f} mean_ms={mean_ms:.3f} p50={p50:.3f} p90={p90:.3f} p99={p99:.3f}")
 
     if args.out:
-        os.makedirs(os.path.dirname(args.out), exist_ok=True)
+        _out_dir = os.path.dirname(args.out)
+        if _out_dir:
+            os.makedirs(_out_dir, exist_ok=True)
         with open(args.out, "w") as f:
             f.write("## MPS intervals summary (from XML)\n\n")
             f.write("| metric | value |\n|---|---:|\n")

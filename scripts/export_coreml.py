@@ -327,15 +327,16 @@ def export_to_coreml(
             pass
     model = ct.convert(traced_model, **convert_kwargs)
     # Optional post-conversion weight quantization
-    try:
-        if use_w8:
-            from coremltools.optimize.coreml import optimize as ct_opt  # type: ignore
-            model = ct_opt(model, optimization_config=ct_opt.OptimizationConfig(global_weight_quantization=True, nbits=8))  # type: ignore
-        elif use_fp16:
-            from coremltools.optimize.coreml import optimize as ct_opt  # type: ignore
-            model = ct_opt(model, optimization_config=ct_opt.OptimizationConfig(global_weight_quantization=True, nbits=16))  # type: ignore
-    except Exception:
-        pass
+    if use_w8 or use_fp16:
+        try:
+            import coremltools.optimize.coreml as ct_opt  # type: ignore
+            nbits = 8 if use_w8 else 16
+            op_config = ct_opt.OpLinearQuantizerConfig(mode="linear_symmetric", weight_threshold=0, nbits=nbits)
+            config = ct_opt.OptimizationConfig(global_config=op_config)
+            model = ct_opt.linear_quantize_weights(model, config=config)
+            print(f"Post-conversion {nbits}-bit weight quantization applied.")
+        except Exception as e:
+            print(f"WARNING: Post-conversion quantization failed: {e}. Model saved as FP32.")
     
     print("Core ML conversion placeholder complete.")
 

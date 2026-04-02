@@ -133,20 +133,30 @@ def scan_directory_for_wavs_text(data_dir: Path) -> List[LSRow]:
     for ext in audio_extensions:
         audio_files.extend(data_dir.rglob(ext))
 
+    empty_count = 0
     for wav_path in audio_files:
         try:
             info = torchaudio.info(str(wav_path))
             dur = float(info.num_frames) / float(info.sample_rate)
         except Exception:
             dur = 0.0
-        
+
         # Get transcription: prefer .trans.txt mapping, fallback to CSV-based mapping
         stem = wav_path.stem  # e.g., 2412-153954-0001
         text = transcripts_map.get(stem, "")
         if not text:
             text = transcriptions.get(wav_path.name, "")
-        
+        if not text:
+            empty_count += 1
+
         rows.append(LSRow(str(wav_path), dur, text))
+    if empty_count > 0:
+        import warnings
+        warnings.warn(
+            f"{empty_count}/{len(audio_files)} audio files have no transcription. "
+            f"Training on empty targets will produce no useful gradients.",
+            stacklevel=2,
+        )
     return rows
 
 

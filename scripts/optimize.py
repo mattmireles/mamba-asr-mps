@@ -330,19 +330,44 @@ def quantization_aware_training(
         example_feats = None
         example_feat_lens = None
         for batch in train_dataloader:
-            if isinstance(batch, (list, tuple)) and len(batch) >= 2:
-                example_feats, example_feat_lens = batch[0].to(device), batch[1].to(device)
-            else:
-                example_feats, example_feat_lens = batch[0].to(device), batch[1].to(device)
+            example_feats, example_feat_lens = batch[0].to(device), batch[1].to(device)
             break
         if example_feats is None:
             raise RuntimeError("No example batch available for PT2E QAT prepare")
 
-        qconfig_mapping = _get_default_qat_qconfig_mapping("fbgemm")
-        # Wrap a small callable to match encode_only signature used during training below
+        # Snapshot teacher outputs before QAT modifies the model
+        teacher_cache = {}
+        def _cache_teacher(dataloader, max_batches=50):
+            model.train(False)
+            idx = 0
+            for batch in dataloader:
+                if isinstance(batch, (list, tuple)) and len(batch) == 5:
+                    f, fl, _, _, _ = batch
+                else:
+                    f, fl, _, _ = batch
+                f, fl = f.to(device), fl.to(device)
+                with torch.no_grad():
+                    enc, _ = model.encode_only(f, fl)
+                teacher_cache[idx] = enc.detach().cpu()
+                idx += 1
+                if idx >= max_batches:
+                    break
+            model.train(True)
+        _cache_teacher(train_dataloader)
+
+        # PT2E QAT requires a Quantizer, not a qconfig_mapping
+        try:
+            from torch.ao.quantization.quantizer.xnnpack_quantizer import (
+                XNNPACKQuantizer,
+                get_symmetric_quantization_config,
+            )
+            quantizer = XNNPACKQuantizer().set_global(get_symmetric_quantization_config())
+        except ImportError:
+            from torch.ao.quantization.quantizer import XNNPACKQuantizer, get_symmetric_quantization_config
+            quantizer = XNNPACKQuantizer().set_global(get_symmetric_quantization_config())
         model_for_qat = model
         model_for_qat.train()
-        prepared = _prepare_qat_pt2e(model_for_qat, example_inputs=(example_feats, example_feat_lens))
+        prepared = _prepare_qat_pt2e(model_for_qat, quantizer)
 
         optimizer = torch.optim.AdamW(prepared.parameters(), lr=lr)
         import time as _time
@@ -352,6 +377,7 @@ def quantization_aware_training(
         loss_fn = nn.MSELoss()
         steps_done = 0
         for epoch in range(max(1, epochs)):
+            batch_idx = 0
             for batch in train_dataloader:
                 if isinstance(batch, (list, tuple)) and len(batch) == 5:
                     feats, feat_lens, _tokens, _token_lens, _texts = batch
@@ -359,17 +385,17 @@ def quantization_aware_training(
                     feats, feat_lens, _tokens, _token_lens = batch
                 feats = feats.to(device)
                 feat_lens = feat_lens.to(device)
-                with torch.no_grad():
-                    target, _ = prepared.encode_only(feats, feat_lens)
+                target = teacher_cache.get(batch_idx % len(teacher_cache), teacher_cache[0]).to(device)
                 pred, _ = prepared.encode_only(feats, feat_lens)
                 Tm = min(target.shape[1], pred.shape[1])
-                loss = loss_fn(pred[:, :Tm, :], target[:, :Tm, :])
+                loss = loss_fn(pred[:, :Tm, :], target[:, :Tm, :].detach())
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
                 total_frames += int(feat_lens.sum().item())
                 last_loss = float(loss.item())
                 steps_done += 1
+                batch_idx += 1
                 if steps_done >= 50:
                     break
             if steps_done >= 50:
@@ -398,9 +424,17 @@ def quantization_aware_training(
             out = self.mod(xq, *args, **kwargs)
             return self.dequant(out)
 
+    # Snapshot teacher outputs before QAT modifies the model
+    import copy as _copy
+    teacher_model = _copy.deepcopy(model).to(device)
+    teacher_model.train(False)
+    for p in teacher_model.parameters():
+        p.requires_grad_(False)
+
     qmodel = QuantWrapper(model).to(device)
     # Default QAT qconfig; 'fbgemm' works for fake-quant on desktop
     qconfig = tq.get_default_qat_qconfig("fbgemm")
+    qmodel.qconfig = qconfig
     tq.prepare_qat(qmodel, inplace=True)
 
     optimizer = torch.optim.AdamW(qmodel.parameters(), lr=lr)
@@ -420,13 +454,13 @@ def quantization_aware_training(
                 feats, feat_lens, _tokens, _token_lens = batch
             feats = feats.to(device)
             feat_lens = feat_lens.to(device)
-            # Simple self-reconstruction loss on encoder features to exercise QAT
+            # Teacher provides frozen target; student (qmodel) learns to match
             with torch.no_grad():
-                target, _ = model.encode_only(feats, feat_lens)
+                target, _ = teacher_model.encode_only(feats, feat_lens)
             pred, _ = qmodel.mod.encode_only(feats, feat_lens)
             # Align time dim
             Tm = min(target.shape[1], pred.shape[1])
-            loss = loss_fn(pred[:, :Tm, :], target[:, :Tm, :])
+            loss = loss_fn(pred[:, :Tm, :], target[:, :Tm, :].detach())
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
@@ -521,6 +555,14 @@ def structured_pruning(
     """
     print("Starting Structured Pruning...")
     device = next(model.parameters()).device
+
+    # Snapshot frozen teacher before pruning modifies the model
+    import copy as _copy
+    teacher_model = _copy.deepcopy(model).to(device)
+    teacher_model.train(False)
+    for p in teacher_model.parameters():
+        p.requires_grad_(False)
+
     model.train()
 
     def iter_prunable_modules(m: nn.Module) -> Iterable[tuple[str, nn.Module]]:
@@ -547,10 +589,9 @@ def structured_pruning(
                             break
                 # Prune a fraction of output channels/neurons (dim=0)
                 prune.ln_structured(mod, name="weight", amount=amount, n=1, dim=0)
-                prune.remove(mod, "weight")
             except Exception:
                 continue
-        # Brief fine-tuning to restore accuracy (self-reconstruction on encoder)
+        # Brief fine-tuning to restore accuracy with masks still active
         optimizer = torch.optim.AdamW(model.parameters(), lr=OptimizationConstants.DEFAULT_QAT_LEARNING_RATE)
         loss_fn = nn.MSELoss()
         steps = 0
@@ -562,7 +603,7 @@ def structured_pruning(
             feats = feats.to(device)
             feat_lens = feat_lens.to(device)
             with torch.no_grad():
-                target, _ = model.encode_only(feats, feat_lens)
+                target, _ = teacher_model.encode_only(feats, feat_lens)
             pred, _ = model.encode_only(feats, feat_lens)
             Tm = min(target.shape[1], pred.shape[1])
             loss = loss_fn(pred[:, :Tm, :], target[:, :Tm, :])
@@ -574,6 +615,12 @@ def structured_pruning(
             steps += 1
             if steps >= 50:
                 break
+    # Make pruning masks permanent after all iterations
+    for _name, mod in iter_prunable_modules(model):
+        try:
+            prune.remove(mod, "weight")
+        except Exception:
+            continue
     if device.type == "mps":
         torch.mps.synchronize()
     elapsed = _time.time() - start
@@ -690,7 +737,9 @@ if __name__ == "__main__":
         student_model, avg_loss, fps = run_kd_short(teacher_cfg, student_cfg, args.manifest, batch_size=args.batch_size, steps=args.steps)
         print(f"KD short pass: avg_loss={avg_loss:.4f} encoder_throughput~{fps:.1f} frames/s")
         if args.save_model:
-            os.makedirs(os.path.dirname(args.save_model), exist_ok=True)
+            _save_dir = os.path.dirname(args.save_model)
+            if _save_dir:
+                os.makedirs(_save_dir, exist_ok=True)
             torch.save({
                 "model_state": student_model.state_dict(),
                 "config": student_cfg.__dict__,
@@ -703,7 +752,9 @@ if __name__ == "__main__":
         qmodel = quantization_aware_training(model, dl, dl, epochs=1)
         print("QAT short pass completed.")
         if args.save_model:
-            os.makedirs(os.path.dirname(args.save_model), exist_ok=True)
+            _save_dir = os.path.dirname(args.save_model)
+            if _save_dir:
+                os.makedirs(_save_dir, exist_ok=True)
             torch.save({
                 "model_state": qmodel.state_dict(),
                 "config": cfg.__dict__,
@@ -734,7 +785,9 @@ if __name__ == "__main__":
         )
         print("Structured pruning short pass completed.")
         if args.save_model:
-            os.makedirs(os.path.dirname(args.save_model), exist_ok=True)
+            _save_dir = os.path.dirname(args.save_model)
+            if _save_dir:
+                os.makedirs(_save_dir, exist_ok=True)
             torch.save({
                 "model_state": pruned.state_dict(),
                 "config": cfg.__dict__,

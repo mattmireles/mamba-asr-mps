@@ -26,7 +26,7 @@ bash "$ROOT_DIR/scripts/run_phase2_baselines.sh"
 # 3) Append summaries into docs (best-effort)
 if [[ -f "$COREML_DIR/latency_sweep.md" ]]; then
   {
-    echo "\n## Latency sweep results"
+    printf '\n## Latency sweep results\n'
     echo
     cat "$COREML_DIR/latency_sweep.md"
   } >> "$PLAN_MD" || true
@@ -35,7 +35,7 @@ fi
 # Note in training notes
 if [[ -f "$COREML_DIR/latency_sweep.md" ]]; then
   {
-    echo "\n- Ran latency sweep (modes=$MODES_ENV, chunks=$CHUNKS_ENV). See exports/CoreMLTraces/latency_sweep.md"
+    printf '\n- Ran latency sweep (modes=%s, chunks=%s). See exports/CoreMLTraces/latency_sweep.md\n' "$MODES_ENV" "$CHUNKS_ENV"
   } >> "$NOTES_MD" || true
 fi
 

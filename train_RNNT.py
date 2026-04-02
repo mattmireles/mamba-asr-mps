@@ -340,15 +340,15 @@ class DummyRNNTDataset(torch.utils.data.Dataset):
         # RNN-T typically uses shorter sequences than CTC
         acoustic_frames = torch.randint(
             low=RNNTDatasetConstants.MIN_FRAMES,
-            high=self.max_T,
+            high=max(RNNTDatasetConstants.MIN_FRAMES + 1, self.max_T + 1),
             size=(1,)
         ).item()
-        
+
         # Generate variable-length token sequence
         # RNN-T requires explicit token sequence (no CTC blanks in input)
         token_length = torch.randint(
             low=RNNTDatasetConstants.MIN_TARGET_LEN,
-            high=self.max_U,
+            high=max(RNNTDatasetConstants.MIN_TARGET_LEN + 1, self.max_U + 1),
             size=(1,)
         ).item()
         
@@ -359,7 +359,7 @@ class DummyRNNTDataset(torch.utils.data.Dataset):
         # Create target tokens (excluding RNN-T blank token at index 0)
         target_tokens = torch.randint(
             low=1,  # Skip RNN-T blank token at index 0
-            high=self.vocab - 1,
+            high=self.vocab,
             size=(token_length,)
         )
         
@@ -478,9 +478,8 @@ def greedy_rnnt_decode_single(
     with torch.no_grad():
         feat_b = feat.unsqueeze(0).to(device)
         len_b = feat_len.unsqueeze(0).to(device)
-        enc_in = model.frontend(feat_b)               # (1, T', D)
-        enc_out = model.encoder(enc_in)                # (1, T', D)
-        Tprime = int(enc_out.shape[1])
+        enc_out, enc_lens = model.encode_only(feat_b, len_b)  # (1, T', D)
+        Tprime = int(enc_lens[0].item())
         # Predictor streaming state
         hidden = None
         token_cur = torch.zeros(1, dtype=torch.long, device=device)  # blank start
@@ -535,8 +534,8 @@ def main():
     parser.add_argument("--grad_clip", type=float, default=0.0, help="Clip global grad-norm to this value (0 disables)")
     parser.add_argument("--skip_non_finite", action="store_true", help="Skip optimizer step when loss is non-finite (nan/inf)")
     parser.add_argument("--log_csv", type=str, default="", help="Optional path to write per-step metrics CSV (step, loss, t_cap, u_cap, align, backend, finite)")
-    parser.add_argument("--log_json", type=str, default="", help="Optional path to write summary metrics JSON at end of run")
-    parser.add_argument("--save_ckpt", type=str, default="", help="Optional path to save a checkpoint at the end of training (.pt)")
+    parser.add_argument("--log_json", type=str, default=None, help="Optional path to write summary metrics JSON at end of run")
+    parser.add_argument("--save_ckpt", type=str, default=None, help="Optional path to save a checkpoint at the end of training (.pt)")
     parser.add_argument("--adaptive_ctc_after_cpu_grad", type=int, default=0, help="If >0, after N consecutive cpu_grad RNNT batches, force encoder-CTC fallback for remainder of run")
     args = parser.parse_args()
 
@@ -659,11 +658,11 @@ def main():
                 # Adaptive CTC fallback gate
                 if force_ctc_rest and not args.force_naive_rnnt:
                     with record_function("ctc_fallback_compute"):
-                        enc_only = logits.max(dim=2).values  # (B, T, V)
+                        enc_only = logits[:, :, 0, :]  # (B, T, V) blank-input position
                         logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
                         targets = []
                         for b in range(tokens.shape[0]):
-                            toks = tokens[b, 1 : token_lens[b]]
+                            toks = tokens[b, 1 : int(token_lens[b].item())]
                             targets.append(toks)
                         flat = torch.cat(targets)
                         tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
@@ -828,11 +827,11 @@ def main():
                             except Exception as e2:
                                 print(f"CPU RNNT w/grad failed ({e2}); using encoder-CTC fallback for this batch.")
                                 with record_function("ctc_fallback_compute"):
-                                    enc_only = logits.max(dim=2).values  # (B, T, V)
+                                    enc_only = logits[:, :, 0, :]  # (B, T, V) blank-input position
                                     logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
                                     targets = []
                                     for b in range(tokens.shape[0]):
-                                        toks = tokens[b, 1 : token_lens[b]]
+                                        toks = tokens[b, 1 : int(token_lens[b].item())]
                                         targets.append(toks)
                                     flat = torch.cat(targets)
                                     tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
@@ -845,11 +844,11 @@ def main():
                                 rnnt_val = rnnt_loss_naive_batch(logits, tokens, out_lens, token_lens, blank=0)
                         # Use encoder-CTC to provide gradients while reporting RNNT value
                         with record_function("ctc_fallback_compute"):
-                            enc_only = logits.max(dim=2).values  # (B, T, V)
+                            enc_only = logits[:, :, 0, :]  # (B, T, V) blank-input position
                             logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
                             targets = []
                             for b in range(tokens.shape[0]):
-                                toks = tokens[b, 1 : token_lens[b]]
+                                toks = tokens[b, 1 : int(token_lens[b].item())]
                                 targets.append(toks)
                             flat = torch.cat(targets)
                             tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
@@ -858,11 +857,11 @@ def main():
                     else:
                         # Fallback: CTC on encoder stream only (approx)
                         with record_function("ctc_fallback_compute"):
-                            enc_only = logits.max(dim=2).values  # (B, T, V)
+                            enc_only = logits[:, :, 0, :]  # (B, T, V) blank-input position
                             logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
                             targets = []
                             for b in range(tokens.shape[0]):
-                                toks = tokens[b, 1 : token_lens[b]]
+                                toks = tokens[b, 1 : int(token_lens[b].item())]
                                 targets.append(toks)
                             flat = torch.cat(targets)
                             tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
@@ -965,7 +964,9 @@ def main():
                 "backend_usage": backend_use_counts,
                 "args": vars(args),
             }
-            _os.makedirs(_os.path.dirname(args.log_json), exist_ok=True)
+            _log_dir = _os.path.dirname(args.log_json)
+            if _log_dir:
+                _os.makedirs(_log_dir, exist_ok=True)
             with open(args.log_json, "w") as _fh:
                 _json.dump(summary, _fh, indent=2)
             print(f"wrote summary JSON: {args.log_json}")
@@ -991,7 +992,9 @@ def main():
             _os.makedirs(default_dir, exist_ok=True)
             ckpt_path = _os.path.join(default_dir, f"rnnt_{int(_time.time())}.pt")
         else:
-            _os.makedirs(_os.path.dirname(ckpt_path), exist_ok=True)
+            _ckpt_dir = _os.path.dirname(ckpt_path)
+            if _ckpt_dir:
+                _os.makedirs(_ckpt_dir, exist_ok=True)
         torch.save({
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),

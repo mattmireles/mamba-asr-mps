@@ -4,9 +4,9 @@ Compute CER/WER for real-audio transcripts.
 
 Usage:
   python scripts/compute_wer_cer.py \
-    --ref Mamba-ASR-MPS/exports/reference_10s.txt \
-    --out Mamba-ASR-MPS/exports/CoreMLTraces/wer_cer_overview.md \
-    --glob "Mamba-ASR-MPS/exports/transcript_*_*.txt"
+    --ref exports/reference_10s.txt \
+    --out exports/CoreMLTraces/wer_cer_overview.md \
+    --glob "exports/transcript_*_*.txt"
 
 Notes:
 - Expects transcripts captured from MambaASRRunner stdout redirection
@@ -57,7 +57,7 @@ class TextProcessingConstants:
     
     # Default glob pattern for transcript file discovery.
     # Matches standard MambaASRRunner output file naming convention.
-    DEFAULT_TRANSCRIPT_PATTERN = "Mamba-ASR-MPS/exports/transcript_*_*.txt"
+    DEFAULT_TRANSCRIPT_PATTERN = "exports/transcript_*_*.txt"
 
 
 def levenshtein(a: List[str], b: List[str]) -> int:
@@ -213,7 +213,8 @@ def main() -> None:
     out_rows: List[Tuple[str, str, float, float]] = []
     any_missing = False
     any_over_threshold = False
-    for tpath in sorted(Path().glob(args.glob)):
+    repo_root = Path(__file__).resolve().parents[1]
+    for tpath in sorted(repo_root.glob(args.glob)):
         hyp_text_raw = extract_text(tpath)
         if args.strict and hyp_text_raw.strip() == "":
             any_missing = True

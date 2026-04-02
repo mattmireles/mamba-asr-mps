@@ -7,8 +7,8 @@ Workflow:
 2) File → Export Table… → Save as CSV (e.g., exports/CoreMLTraces/operations.csv)
 3) Run:
    python Mamba-ASR-MPS/scripts/coreml_ops_remediation.py \
-     --csv Mamba-ASR-MPS/exports/CoreMLTraces/operations.csv \
-     --out Mamba-ASR-MPS/exports/CoreMLTraces/coreml_cpu_ops.md
+     --csv exports/CoreMLTraces/operations.csv \
+     --out exports/CoreMLTraces/coreml_cpu_ops.md
 
 The script parses the CSV, filters rows where Location contains "CPU",
 groups by operation type/name column, aggregates counts and total duration,
@@ -164,7 +164,9 @@ def main() -> None:
     else:
         md.append(generate_markdown(cpu_ops, total_ms))
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    _out_dir = os.path.dirname(args.out)
+    if _out_dir:
+        os.makedirs(_out_dir, exist_ok=True)
     with open(args.out, "w") as f:
         f.write("\n".join(md))
 

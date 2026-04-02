@@ -273,7 +273,7 @@ class DummyDataset(torch.utils.data.Dataset):
         # Create target tokens (excluding blank token at index 0)
         target_tokens = torch.randint(
             low=1,  # Skip CTC blank token at index 0
-            high=self.vocab - 1, 
+            high=self.vocab,
             size=(target_length,)
         )
         

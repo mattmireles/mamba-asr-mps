@@ -152,45 +152,45 @@ class LatencyAnalysisConstants:
     
     # MARK: - CSV Format Configuration
     
-    /// Standard column name for latency measurements in milliseconds.
-    /// Used by MambaASRRunner when generating structured CSV output
-    /// with named columns for automated processing workflows.
+    # Standard column name for latency measurements in milliseconds.
+    # Used by MambaASRRunner when generating structured CSV output
+    # with named columns for automated processing workflows.
     LATENCY_COLUMN_NAME = "latency_ms"
     
-    /// Minimum required columns for unnamed CSV format parsing.
-    /// Fallback format: column 0 = chunk_id, column 1 = latency_ms
-    /// Ensures compatibility with simplified CSV output formats.
+    # Minimum required columns for unnamed CSV format parsing.
+    # Fallback format: column 0 = chunk_id, column 1 = latency_ms
+    # Ensures compatibility with simplified CSV output formats.
     MIN_UNNAMED_COLUMNS = 2
     
-    /// Index of latency column in unnamed CSV format.
-    /// Second column (index 1) contains latency measurements
-    /// when CSV lacks header row or named columns.
+    # Index of latency column in unnamed CSV format.
+    # Second column (index 1) contains latency measurements
+    # when CSV lacks header row or named columns.
     LATENCY_COLUMN_INDEX = 1
     
     # MARK: - Statistical Analysis Configuration
     
-    /// Percentile values for deployment SLA analysis.
-    /// These percentiles provide comprehensive latency characterization
-    /// for real-time speech recognition deployment validation.
+    # Percentile values for deployment SLA analysis.
+    # These percentiles provide comprehensive latency characterization
+    # for real-time speech recognition deployment validation.
     MEDIAN_PERCENTILE = 50.0      # Typical user experience latency
     P90_PERCENTILE = 90.0         # Standard SLA threshold for real-time systems  
     P99_PERCENTILE = 99.0         # Outlier analysis for worst-case scenarios
     
-    /// Decimal precision for latency measurements in report output.
-    /// 3 decimal places provides millisecond-level precision suitable
-    /// for real-time inference latency analysis and SLA validation.
+    # Decimal precision for latency measurements in report output.
+    # 3 decimal places provides millisecond-level precision suitable
+    # for real-time inference latency analysis and SLA validation.
     PRECISION_DECIMAL_PLACES = 3
     
     # MARK: - Report Generation Configuration
     
-    /// Markdown report title for latency analysis documentation.
-    /// Standardized heading for automated report aggregation
-    /// and documentation pipeline integration.
+    # Markdown report title for latency analysis documentation.
+    # Standardized heading for automated report aggregation
+    # and documentation pipeline integration.
     REPORT_TITLE = "## Streaming latency summary"
     
-    /// Markdown table header for structured latency metric display.
-    /// Provides consistent formatting across different analysis runs
-    /// and enables automated report parsing workflows.
+    # Markdown table header for structured latency metric display.
+    # Provides consistent formatting across different analysis runs
+    # and enables automated report parsing workflows.
     TABLE_HEADER = "| metric | ms |\n|---|---:|"
 
 
@@ -297,7 +297,9 @@ def main() -> None:
     p99 = percentile(lat, LatencyAnalysisConstants.P99_PERCENTILE)
 
     # Ensure output directory exists for reliable file generation
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    _out_dir = os.path.dirname(args.out)
+    if _out_dir:
+        os.makedirs(_out_dir, exist_ok=True)
     
     # Generate standardized markdown report
     with open(args.out, "w") as f:

@@ -66,34 +66,34 @@ from typing import Dict, List, Tuple, Any, Optional
 
 # MARK: - Configuration Constants
 
-/// Repository structure and execution environment configuration.
-///
-/// These constants define the file system layout and execution context for
-/// the benchmarking suite, ensuring consistent operation across development
-/// and CI/CD environments while maintaining path resolution compatibility.
+# Repository structure and execution environment configuration.
+#
+# These constants define the file system layout and execution context for
+# the benchmarking suite, ensuring consistent operation across development
+# and CI/CD environments while maintaining path resolution compatibility.
 REPO = Path(__file__).resolve().parents[1]
 PY = sys.executable
 TRAIN = REPO / 'train_RNNT.py'
 EXPORTS = REPO / 'exports'
 EXPORTS.mkdir(parents=True, exist_ok=True)
 
-/// RNN-T implementation benchmark configuration matrix.
-///
-/// Each tuple defines (name, command_args) for systematic testing of different
-/// RNN-T backend implementations. This matrix enables comprehensive evaluation
-/// of performance characteristics across Apple Silicon optimization strategies.
-///
-/// Implementation Details:
-/// - mps_native: Pure MPS implementation leveraging Apple Silicon unified memory
-/// - auto: Intelligent backend selection with performance-based fallback chain
-/// - cpu_grad: Explicit CPU gradient computation for maximum compatibility
-/// - ctc: CTC approximation when RNN-T implementations are unavailable
-///
-/// Performance Testing Strategy:
-/// - Identical training parameters across all implementations for fair comparison
-/// - Sanity mode execution for fast iteration without full dataset overhead
-/// - Structured metric collection for automated performance analysis
-/// - Controlled resource usage to ensure consistent measurement conditions
+# RNN-T implementation benchmark configuration matrix.
+#
+# Each tuple defines (name, command_args) for systematic testing of different
+# RNN-T backend implementations. This matrix enables comprehensive evaluation
+# of performance characteristics across Apple Silicon optimization strategies.
+#
+# Implementation Details:
+# - mps_native: Pure MPS implementation leveraging Apple Silicon unified memory
+# - auto: Intelligent backend selection with performance-based fallback chain
+# - cpu_grad: Explicit CPU gradient computation for maximum compatibility
+# - ctc: CTC approximation when RNN-T implementations are unavailable
+#
+# Performance Testing Strategy:
+# - Identical training parameters across all implementations for fair comparison
+# - Sanity mode execution for fast iteration without full dataset overhead
+# - Structured metric collection for automated performance analysis
+# - Controlled resource usage to ensure consistent measurement conditions
 CASES: List[Tuple[str, List[str]]] = [
     ('mps_native', ['--rnnt_impl', 'mps_native']),
     ('auto', ['--rnnt_impl', 'auto']),
@@ -101,33 +101,33 @@ CASES: List[Tuple[str, List[str]]] = [
     ('ctc', ['--rnnt_impl', 'ctc']),
 ]
 
-/// Benchmark execution parameters optimized for fast iteration and reliability.
-///
-/// These constants balance benchmark accuracy with execution speed for CI/CD
-/// integration while ensuring sufficient data points for meaningful performance
-/// analysis across different Apple Silicon hardware configurations.
+# Benchmark execution parameters optimized for fast iteration and reliability.
+#
+# These constants balance benchmark accuracy with execution speed for CI/CD
+# integration while ensuring sufficient data points for meaningful performance
+# analysis across different Apple Silicon hardware configurations.
 class BenchmarkConstants:
     
-    /// Number of training steps for benchmark execution.
-    /// 60 steps provides sufficient data for statistical analysis while
-    /// maintaining fast execution for CI/CD pipeline integration.
-    /// Balances measurement accuracy with automation efficiency.
+    # Number of training steps for benchmark execution.
+    # 60 steps provides sufficient data for statistical analysis while
+    # maintaining fast execution for CI/CD pipeline integration.
+    # Balances measurement accuracy with automation efficiency.
     STEPS = 60
     
-    /// Batch size for consistent memory usage across implementations.
-    /// Batch size 2 provides meaningful training dynamics while avoiding
-    /// memory pressure on development and CI/CD systems.
-    /// Ensures reproducible performance measurements.
+    # Batch size for consistent memory usage across implementations.
+    # Batch size 2 provides meaningful training dynamics while avoiding
+    # memory pressure on development and CI/CD systems.
+    # Ensures reproducible performance measurements.
     BATCH_SIZE = 2
     
-    /// Environment variable for MPS fallback enabling during benchmarks.
-    /// Prevents NotImplementedError crashes during implementation testing
-    /// while allowing identification of unsupported operation patterns.
+    # Environment variable for MPS fallback enabling during benchmarks.
+    # Prevents NotImplementedError crashes during implementation testing
+    # while allowing identification of unsupported operation patterns.
     MPS_FALLBACK_ENV = 'PYTORCH_ENABLE_MPS_FALLBACK'
     
-    /// Default MPS fallback value for benchmark safety.
-    /// Enables automatic CPU fallback for unsupported MPS operations
-    /// to ensure all implementations complete successfully for comparison.
+    # Default MPS fallback value for benchmark safety.
+    # Enables automatic CPU fallback for unsupported MPS operations
+    # to ensure all implementations complete successfully for comparison.
     MPS_FALLBACK_VALUE = '1'
 
 # MARK: - Benchmark Execution Functions

@@ -60,24 +60,24 @@ Training pipeline integration:
 
 Usage examples:
     # Minimal sanity check on a tiny CSV for development
-    python Mamba-ASR-MPS/train.py \
+    python train.py \
         --train-csv /path/to/train.csv \
         --val-csv /path/to/val.csv \
         --epochs 2 --batch-size 2
 
     # Full production training with optimal hyperparameters
-    python Mamba-ASR-MPS/train.py \
+    python train.py \
         --train-csv data/train.csv --val-csv data/val.csv \
         --epochs 30 --batch-size 8 --lr 3e-4 --d-model 256 --n-blocks 6
 
     # Freeze backbone training (projection head only) for faster fine-tuning
-    python Mamba-ASR-MPS/train.py --freeze-backbone --epochs 10
+    python train.py --freeze-backbone --epochs 10
 
 Output artifacts:
-- Training checkpoints: Mamba-ASR-MPS/exports/checkpoints/
+- Training checkpoints: exports/checkpoints/
 - Best model checkpoint: best.pt (selected by lowest validation CER)
-- Learned projection weights: Mamba-ASR-MPS/exports/projection_1024x29.csv
-- Evaluation reports: Mamba-ASR-MPS/exports/CoreMLTraces/wer_cer_overview_opt.md
+- Learned projection weights: exports/projection_1024x29.csv
+- Evaluation reports: exports/CoreMLTraces/wer_cer_overview_opt.md
 - Training logs: Comprehensive progress tracking and performance metrics
 """
 from __future__ import annotations
@@ -197,7 +197,7 @@ class MambaTrainingConstants:
     # Checkpoint file naming conventions for model persistence
     LAST_CHECKPOINT_NAME = "last.pt"    # Filename for most recent checkpoint
     BEST_CHECKPOINT_NAME = "best.pt"    # Filename for best validation performance checkpoint
-    DEFAULT_CHECKPOINT_DIR = "Mamba-ASR-MPS/exports/checkpoints"  # Default checkpoint directory
+    DEFAULT_CHECKPOINT_DIR = "exports/checkpoints"  # Default checkpoint directory
     
     # Model export constants for CoreML integration
     PROJECTION_WEIGHT_KEY = "proj.weight"   # State dict key for projection layer weights
@@ -479,7 +479,7 @@ class CERScore:
         if len(r) == 0:
             # If reference is empty, count all hyp chars as errors
             self.total_errors += len(h)
-            self.total_chars += max(1, len(r))
+            self.total_chars += max(len(h), 1)
             return
         # Levenshtein distance
         la, lb = len(r), len(h)
@@ -986,10 +986,10 @@ def main() -> None:
 
             loss = criterion(logp, targets_sel, out_lens_sel, tgt_lens_sel)
 
-            optimizer.zero_grad(set_to_none=True)
-            # Guard against NaNs/Infs
+            # Guard against NaNs/Infs before zeroing previous gradients
             if not torch.isfinite(loss):
                 continue
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if math.isfinite(cfg.grad_clip) and cfg.grad_clip > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -1048,8 +1048,9 @@ def main() -> None:
                     "--out", str(proj_out),
                 ]
                 print("Extracting learned projection →", proj_out)
-                rc = os.spawnvp(os.P_WAIT, cmd[0], cmd)
-                if rc != 0:
+                import subprocess
+                result = subprocess.run(cmd)
+                if result.returncode != 0:
                     print("Projection extraction failed (non-zero exit).")
                 else:
                     print("Projection CSV written:", proj_out)
@@ -1058,8 +1059,8 @@ def main() -> None:
                 eval_script = repo_root / "scripts/eval_batch.sh"
                 if eval_script.exists():
                     print("Running batch evaluation harness...")
-                    rc2 = os.spawnlp(os.P_WAIT, "bash", "bash", str(eval_script))
-                    if rc2 != 0:
+                    result2 = subprocess.run(["bash", str(eval_script)])
+                    if result2.returncode != 0:
                         print("Batch evaluation failed (non-zero exit). See logs above.")
                     else:
                         print("Batch evaluation complete. See exports/CoreMLTraces for reports.")

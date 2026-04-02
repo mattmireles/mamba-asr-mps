@@ -135,10 +135,13 @@ class MambaBlock(nn.Module):
         self.in_proj = nn.Linear(d, d, bias=True)
         self.z_proj = nn.Linear(d, d, bias=True)
 
+        # Learned projection for discretization step delta
+        self.dt_proj = nn.Linear(d, d, bias=False)
+
         # State-space parameters following Mamba initialization strategy
         # A: State transition matrix - controls information retention across time
-        # Initialized with small random values for stable dynamics
-        self.A = nn.Parameter(torch.randn(d, n) * ModelConstants.A_INIT_SCALE)
+        # Initialized all-negative to ensure exp(Δ*A) < 1 (contractive/stable)
+        self.A = nn.Parameter(-torch.exp(torch.randn(d, n) * ModelConstants.A_INIT_SCALE))
         
         # D: Skip connection weights - enables identity mapping learning
         # Initialized to ones to preserve input information initially
@@ -171,7 +174,7 @@ class MambaBlock(nn.Module):
         B_proj = self.B_conv(u_t).transpose(1, 2)  # (B,L,N)
         C_proj = self.C_conv(u_t).transpose(1, 2)  # (B,L,N)
 
-        delta = u  # simple parameterization for baseline
+        delta = self.dt_proj(u)  # learned discretization step projection
         with record_function("mamba_block_selective_scan"):
             y = selective_scan(
                 x=u,

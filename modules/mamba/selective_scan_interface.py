@@ -176,11 +176,11 @@ def selective_scan(
             delta_A = (delta_positive.unsqueeze(-1) * A.view(1, 1, A.shape[0], A.shape[1])).exp()
             delta_A = torch.clamp(delta_A, max=1e10)
 
-        # Step 3: Compute discretized input projection (simplified)
+        # Step 3: Compute discretized input projection
+        # delta_B_u must be (B, L, D, N) to preserve per-channel selectivity
         with record_function("ss_input_proj"):
             delta_u = delta_positive * x  # (B, L, D)
-            delta_u_scalar = delta_u.mean(dim=2, keepdim=True)  # (B, L, 1)
-            delta_B_u = delta_u_scalar.unsqueeze(-1) * B_proj.unsqueeze(2)  # (B, L, 1, N)
+            delta_B_u = delta_u.unsqueeze(-1) * B_proj.unsqueeze(2)  # (B, L, D, N)
 
         # Step 4: Initialize state and output accumulation
         hidden_state = h0.clone()  # (B, D, N)

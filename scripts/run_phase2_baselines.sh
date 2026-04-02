@@ -39,9 +39,9 @@ fi
 # Auto-embed latest latency summary into implementation plan (optional best-effort)
 PLAN_MD="$ROOT_DIR/README/implementation-plan-v2.md"
 if [[ -f "$COREML_DIR/latency_summary.md" && -f "$PLAN_MD" ]]; then
-  echo "\nAppending latest latency summary into plan..."
+  printf '\nAppending latest latency summary into plan...\n'
   {
-    echo "\nLatest streaming latency summary:";
+    printf '\nLatest streaming latency summary:\n';
     echo;
     echo '```text';
     cat "$COREML_DIR/latency_summary.md";

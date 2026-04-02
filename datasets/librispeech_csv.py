@@ -97,7 +97,7 @@ References:
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Tuple
 
@@ -265,7 +265,7 @@ class LibriSpeechCSVDataset(torch.utils.data.Dataset):
     """
     manifest: str
     sample_rate: int = DatasetConstants.DEFAULT_SAMPLE_RATE
-    tokenizer: CharTokenizer = CharTokenizer()
+    tokenizer: CharTokenizer = field(default_factory=CharTokenizer)
     max_duration: float = DatasetConstants.DEFAULT_MAX_DURATION
 
     def __post_init__(self):

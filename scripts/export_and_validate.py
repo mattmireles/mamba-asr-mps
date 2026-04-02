@@ -99,13 +99,11 @@ class ExportValidationConstants:
     # MARK: - Directory Structure
     
     # Repository root directory calculated from script location.
-    # Enables consistent path resolution across different execution contexts
-    # including CI/CD environments and development workflows.
-    REPO_ROOT = Path(__file__).resolve().parents[2]
+    # Enables consistent path resolution across different execution contexts.
+    REPO_ROOT = Path(__file__).resolve().parents[1]
     
-    # MambaASR-MPS module root directory for model and script organization.
-    # Central location for all Mamba-related assets and pipeline scripts.
-    MPS_ROOT = REPO_ROOT / "Mamba-ASR-MPS"
+    # Standalone repo root for model and script organization.
+    MPS_ROOT = REPO_ROOT
     
     # Scripts directory containing pipeline automation and utility tools.
     # Houses export_coreml.py and other workflow orchestration scripts.
@@ -117,7 +115,7 @@ class ExportValidationConstants:
     
     # Compiled MambaASRRunner binary path for validation execution.
     # Release build optimized for performance measurement and validation.
-    RUNNER_BIN = RUNNER_DIR / ".build" / "release" / "MambaASRRunner"
+    RUNNER_BIN = RUNNER_DIR / ".build" / "arm64-apple-macosx" / "release" / "MambaASRRunner"
     
     # MARK: - Default Configuration Values
     
@@ -318,7 +316,7 @@ def main() -> None:
     env = os.environ.copy()
     env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     # Ensure PYTHONPATH so export script can import modules
-    env["PYTHONPATH"] = str(ExportValidationConstants.MPS_ROOT)
+    env["PYTHONPATH"] = str(ExportValidationConstants.REPO_ROOT)
     run([sys.executable, str(ExportValidationConstants.SCRIPTS_DIR / "export_coreml.py"),
          "--model", str(ckpt), "--output", str(mlpackage)], env=env)
 
