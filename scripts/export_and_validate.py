@@ -98,47 +98,47 @@ class ExportValidationConstants:
     
     # MARK: - Directory Structure
     
-    /// Repository root directory calculated from script location.
-    /// Enables consistent path resolution across different execution contexts
-    /// including CI/CD environments and development workflows.
+    # Repository root directory calculated from script location.
+    # Enables consistent path resolution across different execution contexts
+    # including CI/CD environments and development workflows.
     REPO_ROOT = Path(__file__).resolve().parents[2]
     
-    /// MambaASR-MPS module root directory for model and script organization.
-    /// Central location for all Mamba-related assets and pipeline scripts.
+    # MambaASR-MPS module root directory for model and script organization.
+    # Central location for all Mamba-related assets and pipeline scripts.
     MPS_ROOT = REPO_ROOT / "Mamba-ASR-MPS"
     
-    /// Scripts directory containing pipeline automation and utility tools.
-    /// Houses export_coreml.py and other workflow orchestration scripts.
+    # Scripts directory containing pipeline automation and utility tools.
+    # Houses export_coreml.py and other workflow orchestration scripts.
     SCRIPTS_DIR = MPS_ROOT / "scripts"
     
-    /// Swift package directory for MambaASRRunner CLI validation tool.
-    /// Contains Package.swift and source files for Core ML validation.
+    # Swift package directory for MambaASRRunner CLI validation tool.
+    # Contains Package.swift and source files for Core ML validation.
     RUNNER_DIR = MPS_ROOT / "swift" / "MambaASRRunner"
     
-    /// Compiled MambaASRRunner binary path for validation execution.
-    /// Release build optimized for performance measurement and validation.
+    # Compiled MambaASRRunner binary path for validation execution.
+    # Release build optimized for performance measurement and validation.
     RUNNER_BIN = RUNNER_DIR / ".build" / "release" / "MambaASRRunner"
     
     # MARK: - Default Configuration Values
     
-    /// Default base name for exported Core ML artifacts.
-    /// Used when --name argument not specified for consistent naming.
+    # Default base name for exported Core ML artifacts.
+    # Used when --name argument not specified for consistent naming.
     DEFAULT_EXPORT_NAME = "MambaASR_export"
     
-    /// Default streaming duration for validation testing (seconds).
-    /// Balanced duration for meaningful performance measurement without excessive runtime.
+    # Default streaming duration for validation testing (seconds).
+    # Balanced duration for meaningful performance measurement without excessive runtime.
     DEFAULT_DURATION_SECONDS = 5
     
-    /// Default warmup inference count to amortize first-call overhead.
-    /// Ensures stable performance measurements by excluding cold-start costs.
+    # Default warmup inference count to amortize first-call overhead.
+    # Ensures stable performance measurements by excluding cold-start costs.
     DEFAULT_WARMUP_COUNT = 2
     
-    /// Default compute unit configuration for Core ML validation.
-    /// Conservative CPU-only setting for maximum compatibility during validation.
+    # Default compute unit configuration for Core ML validation.
+    # Conservative CPU-only setting for maximum compatibility during validation.
     DEFAULT_COMPUTE_UNITS = "cpu"
     
-    /// Default chunk length for streaming validation (frames).
-    /// Balanced chunk size for realistic streaming performance assessment.
+    # Default chunk length for streaming validation (frames).
+    # Balanced chunk size for realistic streaming performance assessment.
     DEFAULT_CHUNK_LENGTH = 256
 
 
@@ -318,8 +318,8 @@ def main() -> None:
     env = os.environ.copy()
     env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     # Ensure PYTHONPATH so export script can import modules
-    env["PYTHONPATH"] = str(MPS_ROOT)
-    run([sys.executable, str(SCRIPTS_DIR / "export_coreml.py"),
+    env["PYTHONPATH"] = str(ExportValidationConstants.MPS_ROOT)
+    run([sys.executable, str(ExportValidationConstants.SCRIPTS_DIR / "export_coreml.py"),
          "--model", str(ckpt), "--output", str(mlpackage)], env=env)
 
     # 2) Compile to .mlmodelc
@@ -330,8 +330,8 @@ def main() -> None:
     ])
 
     # 3) Build Swift runner if missing
-    if not RUNNER_BIN.exists():
-        run(["swift", "build", "-c", "release", "--package-path", str(RUNNER_DIR)])
+    if not ExportValidationConstants.RUNNER_BIN.exists():
+        run(["swift", "build", "-c", "release", "--package-path", str(ExportValidationConstants.RUNNER_DIR)])
 
     # 3.5) Optionally emit a simple character vocab JSON for greedy decode
     vocab_path: Path | None = None
@@ -353,7 +353,7 @@ def main() -> None:
 
     # 4) Run Swift runner in streaming mode
     cmd = [
-        str(RUNNER_BIN),
+        str(ExportValidationConstants.RUNNER_BIN),
         "--mlmodelc", str(mlmodelc),
         "--mlpackage", str(mlpackage),
         "--stream", "--duration", str(args.duration),

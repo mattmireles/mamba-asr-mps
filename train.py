@@ -834,8 +834,8 @@ def run_validation(model: nn.Module, criterion: nn.CTCLoss, loader: DataLoader, 
             total_batches += 1
 
             # Greedy decode and CER
-            pred_ids_batch = ctc_greedy_decode(logits_29)
-            for pred_ids, ref_text in zip(pred_ids_batch, texts):
+            pred_ids_batch = ctc_greedy_decode(logits_29[good_idx])
+            for pred_ids, ref_text in zip(pred_ids_batch, [texts[i] for i in good_idx]):
                 hyp_text = ids_to_text(pred_ids, tokenizer)
                 # Simple normalization: lowercase and collapse whitespace
                 ref_norm = tokenizer.normalize(ref_text)

@@ -403,7 +403,7 @@ def quantization_aware_training(
     qconfig = tq.get_default_qat_qconfig("fbgemm")
     tq.prepare_qat(qmodel, inplace=True)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(qmodel.parameters(), lr=lr)
     steps_per_epoch = 0
     loss_fn = nn.MSELoss()
     # Simple throughput metric
