@@ -13,8 +13,14 @@ from __future__ import annotations
 import argparse
 import os
 import statistics
-import xml.etree.ElementTree as ET
+import sys
+from pathlib import Path
 from typing import List
+
+import defusedxml.ElementTree as ET
+
+# Project root used for --out path containment check.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_durations_us(xml_path: str) -> List[int]:
@@ -68,10 +74,17 @@ def main() -> None:
     print(f"count={count} total_ms={total_ms:.2f} mean_ms={mean_ms:.3f} p50={p50:.3f} p90={p90:.3f} p99={p99:.3f}")
 
     if args.out:
-        _out_dir = os.path.dirname(args.out)
+        out_path = Path(args.out).resolve()
+        # Prevent writing outside the project directory
+        try:
+            out_path.relative_to(_REPO_ROOT)
+        except ValueError:
+            print(f"Error: --out must be within the project directory: {out_path}")
+            sys.exit(1)
+        _out_dir = os.path.dirname(out_path)
         if _out_dir:
             os.makedirs(_out_dir, exist_ok=True)
-        with open(args.out, "w") as f:
+        with open(out_path, "w") as f:
             f.write("## MPS intervals summary (from XML)\n\n")
             f.write("| metric | value |\n|---|---:|\n")
             f.write(f"| count | {count} |\n")

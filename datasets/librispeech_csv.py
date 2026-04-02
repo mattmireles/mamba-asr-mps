@@ -97,6 +97,7 @@ References:
 from __future__ import annotations
 
 import csv
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Tuple
@@ -394,9 +395,13 @@ class LibriSpeechCSVDataset(torch.utils.data.Dataset):
                 # Convert to dB scale and transpose to time-first: (T, 80)
                 mel_db = self._amp_to_db(mel_spec).transpose(0, 1)
                 
-            except Exception:
-                # Fallback to synthetic data if audio processing fails
-                T = max(DatasetConstants.MIN_SYNTHETIC_FRAMES, 
+            except Exception as _exc:
+                warnings.warn(
+                    f"Audio load/process failed for '{path}' ({_exc}); substituting synthetic frames.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                T = max(DatasetConstants.MIN_SYNTHETIC_FRAMES,
                        int(dur * DatasetConstants.FRAMES_PER_SECOND))
                 mel_db = torch.randn(T, DatasetConstants.N_MELS)
         else:

@@ -1,1 +1,0 @@
-Mamba-ASR-MPS/scripts/eval_batch.sh: line 93: /Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/Mamba-ASR-MPS/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner: No such file or directory

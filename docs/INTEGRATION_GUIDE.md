@@ -103,7 +103,7 @@ def integrated_export_example():
     \"\"\"
     
     # Step 1: Load trained PyTorch model
-    checkpoint = torch.load("checkpoints/trained_model.pt", map_location="cpu")
+    checkpoint = torch.load("checkpoints/trained_model.pt", map_location="cpu", weights_only=True)
     model = MCTModel.from_checkpoint(checkpoint)
     model.eval()
     
@@ -559,7 +559,7 @@ class TestSystemIntegration:
         \"\"\"Test complete training → export → validation pipeline.\"\"\"
         
         # Step 1: Verify checkpoint can be loaded
-        checkpoint = torch.load(trained_model_checkpoint, map_location="cpu")
+        checkpoint = torch.load(trained_model_checkpoint, map_location="cpu", weights_only=True)
         assert "model_state_dict" in checkpoint
         
         # Step 2: Export to Core ML

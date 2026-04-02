@@ -1,1 +1,0 @@
-Also, I noticed on the div class field, they also add the classes there. And just look at all the consistencies that we could bring over.

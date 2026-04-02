@@ -298,6 +298,20 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    # Prevent path traversal via --name (must be a plain filename, no separators)
+    if "/" in args.name or "\\" in args.name or ".." in args.name:
+        print(f"❌ --name must be a plain filename with no path components: {args.name!r}")
+        sys.exit(1)
+
+    # Prevent path traversal via --vocab_out (must stay within project root)
+    if args.vocab_out:
+        _vocab_resolved = Path(args.vocab_out).resolve()
+        try:
+            _vocab_resolved.relative_to(ExportValidationConstants.MPS_ROOT)
+        except ValueError:
+            print(f"❌ --vocab_out must be within the project directory: {_vocab_resolved}")
+            sys.exit(1)
+
     # Validate checkpoint file exists and is accessible
     ckpt = Path(args.checkpoint).resolve()
     if not ckpt.exists():

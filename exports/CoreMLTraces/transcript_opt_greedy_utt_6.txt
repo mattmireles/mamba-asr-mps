@@ -1,9 +1,0 @@
-📦 Loaded and compiled model: /Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/exports/MambaASR_opt.mlpackage
-CoreML: prediction start
-CoreML: prediction end
-[chunk 0] last-step argmax token id = 0 | latency=4.01 ms
-⏱️ per-chunk latency: avg=4.01 ms, p50=4.01 ms, p90=4.01 ms (n=1)
-📝 Transcript (ids): []… (len=0)
-✅ Streaming loop completed: processed 1 chunk(s)
-🎉 MambaASR Core ML validation completed successfully
-✅ Model is ready for iOS/macOS deployment

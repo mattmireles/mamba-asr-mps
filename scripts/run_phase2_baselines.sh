@@ -36,15 +36,17 @@ if [[ -f "$LATCSV" ]]; then
   echo "Latency summary written to $COREML_DIR/latency_summary.md"
 fi
 
-# Auto-embed latest latency summary into implementation plan (optional best-effort)
+# Auto-embed latest latency summary into implementation plan (optional best-effort, idempotent)
 PLAN_MD="$ROOT_DIR/README/implementation-plan-v2.md"
 if [[ -f "$COREML_DIR/latency_summary.md" && -f "$PLAN_MD" ]]; then
-  printf '\nAppending latest latency summary into plan...\n'
-  {
-    printf '\nLatest streaming latency summary:\n';
-    echo;
-    echo '```text';
-    cat "$COREML_DIR/latency_summary.md";
-    echo '```';
-  } >> "$PLAN_MD" || true
+  if ! grep -qF 'Latest streaming latency summary' "$PLAN_MD" 2>/dev/null; then
+    printf '\nAppending latest latency summary into plan...\n'
+    {
+      printf '\nLatest streaming latency summary:\n';
+      echo;
+      echo '```text';
+      cat "$COREML_DIR/latency_summary.md";
+      echo '```';
+    } >> "$PLAN_MD" || true
+  fi
 fi

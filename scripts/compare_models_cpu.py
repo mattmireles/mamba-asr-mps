@@ -27,7 +27,7 @@ def parse_cpu_avg(md_path: Path):
 
 def main():
     # Prefer fresh per-run CSVs/tables if present in training notes/plan; fallback to older sweep markdowns
-    plan = Path('Mamba-ASR-MPS/README/implementation-plan-v2.md').read_text()
+    plan = Path("README/implementation-plan-v2.md").read_text()
     def extract_from_plan(model: str):
         # Look for CPU-only table values
         for line in plan.splitlines():

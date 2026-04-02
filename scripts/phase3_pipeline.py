@@ -82,8 +82,8 @@ import sys
 
 ## Repository path configuration for Phase 3 pipeline execution.
 ## These paths enable reliable script execution across different environments.
-REPO_ROOT = Path(__file__).resolve().parents[2]
-MPS_ROOT = REPO_ROOT / "Mamba-ASR-MPS"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MPS_ROOT = REPO_ROOT
 SCRIPTS = MPS_ROOT / "scripts"
 
 # MARK: - Pipeline Execution Utilities

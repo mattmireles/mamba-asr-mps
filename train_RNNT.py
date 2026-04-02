@@ -840,19 +840,7 @@ def main():
                     # Attempt naive RNNT for very small T,U (sanity only)
                     if rnnt_use_naive:
                         with record_function("rnnt_loss_naive_compute"):
-                            with torch.no_grad():
-                                rnnt_val = rnnt_loss_naive_batch(logits, tokens, out_lens, token_lens, blank=0)
-                        # Use encoder-CTC to provide gradients while reporting RNNT value
-                        with record_function("ctc_fallback_compute"):
-                            enc_only = logits[:, :, 0, :]  # (B, T, V) blank-input position
-                            logp = enc_only.log_softmax(dim=-1).transpose(0, 1)
-                            targets = []
-                            for b in range(tokens.shape[0]):
-                                toks = tokens[b, 1 : int(token_lens[b].item())]
-                                targets.append(toks)
-                            flat = torch.cat(targets)
-                            tgt_lens = torch.tensor([len(t) for t in targets], device=logp.device)
-                            loss = ctc_loss(logp, flat, out_lens, tgt_lens)
+                            loss = rnnt_loss_naive_batch(logits, tokens, out_lens, token_lens, blank=0)
                             backend_used = "naive"
                     else:
                         # Fallback: CTC on encoder stream only (approx)

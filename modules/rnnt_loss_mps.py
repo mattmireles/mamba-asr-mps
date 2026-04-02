@@ -61,7 +61,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-from modules.rnnt_loss import _rnnt_loss_cpu_with_grad
+from modules.rnnt_loss import _rnnt_loss_cpu_with_grad, select_rnnt_backend
 
 
 # =============================================================================
@@ -153,25 +153,7 @@ def select_best_backend():
         ...     # Handle graceful degradation
         ...     loss = fallback_implementation()
     """
-    # Prefer torchaudio prototype
-    try:
-        from torchaudio.prototype.rnnt import rnnt_loss as ta_rnnt_loss  # type: ignore
-        return ta_rnnt_loss, "torchaudio"
-    except Exception:
-        pass
-    # Fallback: warp_rnnt if available
-    try:
-        from warp_rnnt import rnnt_loss as warp_rnnt_loss  # type: ignore
-        return warp_rnnt_loss, "warp_rnnt"
-    except Exception:
-        pass
-    # Last resort: torchaudio.functional (deprecated but still widely available)
-    try:
-        from torchaudio.functional import rnnt_loss as ta_rnnt_loss_fn  # type: ignore
-        return ta_rnnt_loss_fn, "torchaudio"
-    except Exception:
-        pass
-    return None, "none"
+    return select_rnnt_backend("auto")
 
 
 ## _cpu_grad_fallback is now provided by the shared rnnt_loss module.

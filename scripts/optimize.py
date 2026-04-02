@@ -230,19 +230,10 @@ def knowledge_distillation(
     - Coordinates with: quantization_aware_training() for further optimization
     - Prepares for: export_coreml.py conversion to Core ML format
     """
-    print("Starting Knowledge Distillation...")
-    # Placeholder for distillation logic:
-    # 1. Set up optimizer and schedulers.
-    # 2. Loop through epochs and batches.
-    # 3. Get teacher logits (with no_grad).
-    # 4. Calculate student logits.
-    # 5. Compute KL-divergence loss between softened logits.
-    # 6. Compute Cross-Entropy loss with ground-truth labels.
-    # 7. Combine losses using alpha.
-    # 8. Backpropagate and update student model weights.
-    # 9. Validate and save the best model.
-    print("Knowledge Distillation placeholder complete.")
-    return student_model
+    raise NotImplementedError(
+        "Knowledge distillation is not yet implemented. "
+        "See the TODO comment block above for the planned algorithm."
+    )
 
 
 def quantization_aware_training(

@@ -75,9 +75,6 @@ class ModelConstants:
     LAYERNORM_EPS = 1e-5    # Standard epsilon for layer normalization
     CONV_KERNEL_SIZE = 1    # Pointwise convolution for time-varying projections
     
-    # Memory Layout
-    TRANSPOSE_THRESHOLD = 1000  # Below this size, avoid transpose operations
-    
     @staticmethod
     def get_init_info() -> str:
         """Return initialization strategy documentation."""

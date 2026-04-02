@@ -424,8 +424,8 @@ private enum MambaASRConstants {
     /// Default file paths relative to repository root for model loading.
     /// Enables convenient testing during development workflow.
     /// Production deployments should use absolute paths.
-    static let defaultMLPackagePath = "../../MambaASR.mlpackage"
-    static let defaultCompiledPath = "../../MambaASR.mlmodelc"
+    static let defaultMLPackagePath = "../../exports/MambaASR_opt.mlpackage"
+    static let defaultCompiledPath = "../../exports/MambaASR_opt.mlmodelc"
 }
 
 // MARK: - Core ML Model Management

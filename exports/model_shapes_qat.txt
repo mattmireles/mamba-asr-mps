@@ -1,9 +1,0 @@
-📦 Loaded and compiled model: /Users/mattmireles/Documents/GitHub/whisper/whisper-fine-tuner-macos/Mamba-ASR-MPS/exports/MambaASR_qat.mlpackage
-CoreML: prediction start
-CoreML: prediction end
-✅ INFERENCE SUCCESS
-📊 Output tensor shapes:
-   logits_time: [1, 64, 1, 1024]
-   predictor_hidden_out: [1, 1, 256]
-🎉 MambaASR Core ML validation completed successfully
-✅ Model is ready for iOS/macOS deployment

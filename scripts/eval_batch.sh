@@ -75,7 +75,7 @@ readonly REQUIRED_CHANNELS=1            # Required audio channel count (mono)
 # - Blank Gate Margin: 0.5 (prevents excessive blank token emission)
 # - Audio Format: 16kHz mono WAV (required by MambaASRRunner)
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"  # This resolves to .../Mamba-ASR-MPS
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"  # This resolves to the mamba-asr-mps repository root
 RUNNER="$ROOT_DIR/swift/MambaASRRunner/.build/arm64-apple-macosx/release/MambaASRRunner"
 MLPKG="$ROOT_DIR/exports/MambaASR_opt.mlpackage"
 MLC="$ROOT_DIR/exports/MambaASR_opt.mlmodelc"
@@ -123,12 +123,3 @@ for wav in "${WAVS[@]}"; do
 done
 shopt -u nullglob
 
-# Single reference for now: user-provided or per-file refs by name if present
-REF_ALL="$ROOT_DIR/Mamba-ASR-MPS/exports/testset/refs/hello_world_16k.txt"
-if [[ -f "$REF_ALL" ]]; then
-  python3 "$ROOT_DIR/Mamba-ASR-MPS/scripts/compute_wer_cer.py" \
-    --ref "$REF_ALL" \
-    --glob "$OUT_DIR/transcript_${MODEL_NAME}_greedy_*.txt" \
-    --out "$OUT_DIR/wer_cer_overview_${MODEL_NAME}.md" \
-    --cer-only --cer-threshold "$CER_THRESHOLD" --strict || true
-fi

@@ -63,8 +63,8 @@ from scripts import knowledge_distillation, export_to_coreml
 from torch.utils.data import DataLoader
 
 # Load your trained models and data
-teacher_model = torch.load("large_mct.pth")
-student_model = torch.load("compact_mct.pth")
+teacher_model = torch.load("large_mct.pth", weights_only=True)
+student_model = torch.load("compact_mct.pth", weights_only=True)
 train_loader = DataLoader(train_dataset, batch_size=16)
 val_loader = DataLoader(val_dataset, batch_size=16)
 

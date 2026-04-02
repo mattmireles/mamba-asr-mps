@@ -62,8 +62,7 @@ AI-First Design Principles:
 """
 
 # Re-export all configuration classes for convenient access
-from .core_config import MambaASRConfig
 from .apple_silicon_config import AppleSiliconConfig
 from .environment_config import EnvironmentConfig
 
-__all__ = ['MambaASRConfig', 'AppleSiliconConfig', 'EnvironmentConfig']
+__all__ = ['AppleSiliconConfig', 'EnvironmentConfig']

@@ -23,20 +23,24 @@ bash "$ROOT_DIR/scripts/run_latency_probe.sh"
 # 2) Phase 2 RNNT baselines (short sanity)
 bash "$ROOT_DIR/scripts/run_phase2_baselines.sh"
 
-# 3) Append summaries into docs (best-effort)
+# 3) Append summaries into docs (best-effort, idempotent)
 if [[ -f "$COREML_DIR/latency_sweep.md" ]]; then
-  {
-    printf '\n## Latency sweep results\n'
-    echo
-    cat "$COREML_DIR/latency_sweep.md"
-  } >> "$PLAN_MD" || true
+  if ! grep -qF '## Latency sweep results' "$PLAN_MD" 2>/dev/null; then
+    {
+      printf '\n## Latency sweep results\n'
+      echo
+      cat "$COREML_DIR/latency_sweep.md"
+    } >> "$PLAN_MD" || true
+  fi
 fi
 
-# Note in training notes
+# Note in training notes (idempotent)
 if [[ -f "$COREML_DIR/latency_sweep.md" ]]; then
-  {
-    printf '\n- Ran latency sweep (modes=%s, chunks=%s). See exports/CoreMLTraces/latency_sweep.md\n' "$MODES_ENV" "$CHUNKS_ENV"
-  } >> "$NOTES_MD" || true
+  if ! grep -qF 'Ran latency sweep' "$NOTES_MD" 2>/dev/null; then
+    {
+      printf '\n- Ran latency sweep (modes=%s, chunks=%s). See exports/CoreMLTraces/latency_sweep.md\n' "$MODES_ENV" "$CHUNKS_ENV"
+    } >> "$NOTES_MD" || true
+  fi
 fi
 
 echo "Phase 3 report complete. Updated $PLAN_MD and $NOTES_MD"

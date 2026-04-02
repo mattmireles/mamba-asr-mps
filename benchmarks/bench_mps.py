@@ -101,7 +101,8 @@ def bench_ctc(device: torch.device, steps: int = 20, batch_size: int = 2, T: int
     print(f"CTC: steps={steps} bs={batch_size} T={T} throughput~{total/elapsed:.1f} frames/s loss={loss.item():.3f}")
 
 
-def bench_rnnt(device: torch.device, steps: int = 10, batch_size: int = 2, T: int = 600, U: int = 30):
+def bench_rnnt_ctc_proxy(device: torch.device, steps: int = 10, batch_size: int = 2, T: int = 600, U: int = 30):
+    # NOTE: Uses CTC loss on encoder-only slice as proxy for RNNT throughput.
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     model = MCTModel(MCTConfig()).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=3e-4)
@@ -164,7 +165,7 @@ def main():
     ctx = mps_profile() if args.profile else contextlib.nullcontext()
     with ctx:
         bench_ctc(device, steps=5, batch_size=args.bs, T=800)
-        bench_rnnt(device, steps=3, batch_size=args.bs, T=600, U=30)
+        bench_rnnt_ctc_proxy(device, steps=3, batch_size=args.bs, T=600, U=30)
 
 
 if __name__ == "__main__":

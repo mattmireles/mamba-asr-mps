@@ -66,10 +66,6 @@ class SelectiveScanConstants:
     MODEL_DIM = 2      # Model/feature dimension index
     STATE_DIM = 3      # State space dimension index (for 4D tensors)
     
-    # Memory Layout Constants
-    # Apple Silicon unified memory considerations
-    EINSUM_THRESHOLD = 1000  # Below this size, use explicit broadcasting over einsum
-    
     @staticmethod
     def get_numerical_info() -> str:
         """Return documentation about numerical choices for AI developers."""
@@ -201,12 +197,12 @@ def selective_scan(
                 output_timesteps.append(y_timestep)
 
         # Step 6: Combine outputs and apply residual connections
+        # Gate only the SSM output; D*x skip bypasses the gate (canonical Mamba)
         with record_function("ss_output_post"):
             output_sequence = torch.stack(output_timesteps, dim=1)  # (B, L, D)
             skip_connection = x * D.view(1, 1, -1)
-            output_with_skip = output_sequence + skip_connection
             gating_weights = torch.sigmoid(z)
-            final_output = output_with_skip * gating_weights
+            final_output = output_sequence * gating_weights + skip_connection
         return final_output  # (B, L, D)
 
 

@@ -18,5 +18,5 @@ def main(out_path: str) -> None:
     Path(out_path).write_text("\n".join(out))
 
 if __name__ == "__main__":
-    out = sys.argv[1] if len(sys.argv) > 1 else "Mamba-ASR-MPS/exports/projection_1024x29.modmap.csv"
+    out = sys.argv[1] if len(sys.argv) > 1 else "exports/projection_1024x29.modmap.csv"
     main(out)
