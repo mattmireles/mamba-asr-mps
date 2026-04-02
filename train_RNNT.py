@@ -742,6 +742,78 @@ def _rnnt_loss_cpu_with_grad(
     grad_logits = logits_cpu.grad.to(logits.device)
     return total.to(logits.device).detach(), grad_logits.detach()
 
+
+def greedy_rnnt_decode_single(
+    model: "nn.Module",
+    feat: "torch.Tensor",
+    feat_len: "torch.Tensor",
+    tokenizer: "CharTokenizer",
+    device: "torch.device",
+) -> str:
+    """Greedy RNN-T decode for a single utterance (approximate, for logging WER).
+
+    Runs the full encoder-predictor-joiner pipeline on one feature tensor
+    and returns the decoded hypothesis string.  Used during training to
+    compute an approximate WER on the first sample of the batch.
+
+    Called from three locations inside ``main()``'s training loop:
+      - The first ``cpu_grad`` fallback branch (explicit CPU RNNT w/ grad)
+      - The second ``cpu_grad`` branch inside the ``mps_native`` facade path
+      - The main metrics-logging block at the bottom of the step loop
+
+    The function temporarily switches the model to eval mode (disabling
+    dropout, etc.) and restores train mode before returning.
+
+    Args:
+        model: The RNN-T model containing ``.frontend``, ``.encoder``,
+            ``.predictor``, and ``.joiner`` sub-modules.
+        feat: Feature tensor for a single utterance, shape ``(T, n_mels)``.
+            Should already be on CPU; will be moved to *device* internally.
+        feat_len: Scalar or 1-element tensor with the valid length of *feat*.
+        tokenizer: Tokenizer instance whose ``.decode()`` converts token-id
+            lists back to text.
+        device: Target device (``mps``, ``cuda``, or ``cpu``) for inference.
+
+    Returns:
+        The decoded hypothesis string.
+    """
+    model.eval()
+    with torch.no_grad():
+        feat_b = feat.unsqueeze(0).to(device)
+        len_b = feat_len.unsqueeze(0).to(device)
+        enc_in = model.frontend(feat_b)               # (1, T', D)
+        enc_out = model.encoder(enc_in)                # (1, T', D)
+        Tprime = int(enc_out.shape[1])
+        # Predictor streaming state
+        hidden = None
+        token_cur = torch.zeros(1, dtype=torch.long, device=device)  # blank start
+        hyp_ids: list[int] = []
+        max_total = 128
+        total_dec = 0
+        for t in range(Tprime):
+            u = 0
+            while u < 32 and total_dec < max_total:
+                with record_function("predictor_step"):
+                    pred_step, hidden = model.predictor.forward_streaming(
+                        token_cur.unsqueeze(1), hidden
+                    )
+                # Join for this (t, u)
+                with record_function("joiner_step"):
+                    logits_tu = model.joiner(
+                        enc_out[:, t : t + 1, :], pred_step
+                    )  # (1, 1, 1, V)
+                next_id = int(logits_tu[0, 0, 0].argmax().item())
+                total_dec += 1
+                if next_id == RNNTTrainingConstants.RNNT_BLANK_TOKEN:
+                    break
+                hyp_ids.append(next_id)
+                token_cur = torch.tensor([next_id], dtype=torch.long, device=device)
+                u += 1
+        hyp = tokenizer.decode(hyp_ids)
+    model.train()
+    return hyp
+
+
 def main():
     import argparse
 
@@ -918,35 +990,7 @@ def main():
                                 f"align(T'U')={align_size} (T'={t_cap}, U={u_cap})"
                             )
                             if texts is not None:
-                                def greedy_rnnt_decode_single(feat: torch.Tensor, feat_len: torch.Tensor) -> str:
-                                    model.eval()
-                                    with torch.no_grad():
-                                        feat_b = feat.unsqueeze(0).to(device)
-                                        len_b = feat_len.unsqueeze(0).to(device)
-                                        enc_in = model.frontend(feat_b)
-                                        enc_out = model.encoder(enc_in)
-                                        Tprime = int(enc_out.shape[1])
-                                        hidden = None
-                                        token_cur = torch.zeros(1, dtype=torch.long, device=device)
-                                        hyp_ids = []
-                                        max_total = 128
-                                        total_dec = 0
-                                        for t in range(Tprime):
-                                            u = 0
-                                            while u < 32 and total_dec < max_total:
-                                                pred_step, hidden = model.predictor.forward_streaming(token_cur.unsqueeze(1), hidden)
-                                                logits_tu = model.joiner(enc_out[:, t:t+1, :], pred_step)
-                                                next_id = int(logits_tu[0, 0, 0].argmax().item())
-                                                total_dec += 1
-                                                if next_id == RNNTTrainingConstants.RNNT_BLANK_TOKEN:
-                                                    break
-                                                hyp_ids.append(next_id)
-                                                token_cur = torch.tensor([next_id], dtype=torch.long, device=device)
-                                                u += 1
-                                        hyp = tokenizer.decode(hyp_ids)
-                                    model.train()
-                                    return hyp
-                                hyp_text = greedy_rnnt_decode_single(feats[0].cpu(), feat_lens[0].cpu())
+                                hyp_text = greedy_rnnt_decode_single(model, feats[0].cpu(), feat_lens[0].cpu(), tokenizer, device)
                                 ref_text = tokenizer.normalize(texts[0])
                                 log_msg += f" wer~{wer(ref_text, hyp_text):.3f}"
                             print(log_msg)
@@ -1071,35 +1115,7 @@ def main():
                                     )
                                     if texts is not None:
                                         # Greedy decode for first sample for approximate WER
-                                        def greedy_rnnt_decode_single(feat: torch.Tensor, feat_len: torch.Tensor) -> str:
-                                            model.eval()
-                                            with torch.no_grad():
-                                                feat_b = feat.unsqueeze(0).to(device)
-                                                len_b = feat_len.unsqueeze(0).to(device)
-                                                enc_in = model.frontend(feat_b)
-                                                enc_out = model.encoder(enc_in)
-                                                Tprime = int(enc_out.shape[1])
-                                                hidden = None
-                                                token_cur = torch.zeros(1, dtype=torch.long, device=device)
-                                                hyp_ids = []
-                                                max_total = 128
-                                                total_dec = 0
-                                                for t in range(Tprime):
-                                                    u = 0
-                                                    while u < 32 and total_dec < max_total:
-                                                        pred_step, hidden = model.predictor.forward_streaming(token_cur.unsqueeze(1), hidden)
-                                                        logits_tu = model.joiner(enc_out[:, t:t+1, :], pred_step)
-                                                        next_id = int(logits_tu[0, 0, 0].argmax().item())
-                                                        total_dec += 1
-                                                        if next_id == RNNTTrainingConstants.RNNT_BLANK_TOKEN:
-                                                            break
-                                                        hyp_ids.append(next_id)
-                                                        token_cur = torch.tensor([next_id], dtype=torch.long, device=device)
-                                                        u += 1
-                                                hyp = tokenizer.decode(hyp_ids)
-                                            model.train()
-                                            return hyp
-                                        hyp_text = greedy_rnnt_decode_single(feats[0].cpu(), feat_lens[0].cpu())
+                                        hyp_text = greedy_rnnt_decode_single(model, feats[0].cpu(), feat_lens[0].cpu(), tokenizer, device)
                                         ref_text = tokenizer.normalize(texts[0])
                                         log_msg += f" wer~{wer(ref_text, hyp_text):.3f}"
                                     print(log_msg)
@@ -1196,43 +1212,8 @@ def main():
                     log_msg = f"epoch {epoch} step {step} loss {loss.item():.4f} align(T'U')={align_size} (T'={t_cap}, U={u_cap})"
                     # Rough WER via encoder-only greedy if texts available (approximate)
                     if texts is not None:
-                        # Greedy RNN-T decode (approximate, small batch)
-                        def greedy_rnnt_decode_single(feat: torch.Tensor, feat_len: torch.Tensor) -> str:
-                            # feat: (T, 80)
-                            model.eval()
-                            with torch.no_grad():
-                                feat_b = feat.unsqueeze(0).to(device)
-                                len_b = feat_len.unsqueeze(0).to(device)
-                                enc_in = model.frontend(feat_b)               # (1, T', D)
-                                enc_out = model.encoder(enc_in)                # (1, T', D)
-                                Tprime = int(enc_out.shape[1])
-                                # Predictor streaming state
-                                hidden = None
-                                token_cur = torch.zeros(1, dtype=torch.long, device=device)  # blank start
-                                hyp_ids = []
-                                max_total = 128
-                                total = 0
-                                for t in range(Tprime):
-                                    u = 0
-                                    while u < 32 and total < max_total:
-                                        with record_function("predictor_step"):
-                                            pred_step, hidden = model.predictor.forward_streaming(token_cur.unsqueeze(1), hidden)
-                                        # Join for this (t,u)
-                                        with record_function("joiner_step"):
-                                            logits_tu = model.joiner(enc_out[:, t:t+1, :], pred_step)  # (1,1,1,V)
-                                        next_id = int(logits_tu[0, 0, 0].argmax().item())
-                                        total += 1
-                                        if next_id == RNNTTrainingConstants.RNNT_BLANK_TOKEN:
-                                            break
-                                        else:
-                                            hyp_ids.append(next_id)
-                                            token_cur = torch.tensor([next_id], dtype=torch.long, device=device)
-                                            u += 1
-                                hyp = tokenizer.decode(hyp_ids)
-                            model.train()
-                            return hyp
                         # Compute WER for first sample only (speed)
-                        hyp_text = greedy_rnnt_decode_single(feats[0].cpu(), feat_lens[0].cpu())
+                        hyp_text = greedy_rnnt_decode_single(model, feats[0].cpu(), feat_lens[0].cpu(), tokenizer, device)
                         ref_text = tokenizer.normalize(texts[0])
                         log_msg += f" wer~{wer(ref_text, hyp_text):.3f}"
                     print(log_msg)
