@@ -342,7 +342,7 @@ def quantization_aware_training(
         # Wrap a small callable to match encode_only signature used during training below
         model_for_qat = model
         model_for_qat.train()
-        prepared = _prepare_qat_pt2e(model_for_qat, qconfig_mapping, example_inputs=(example_feats, example_feat_lens))
+        prepared = _prepare_qat_pt2e(model_for_qat, example_inputs=(example_feats, example_feat_lens))
 
         optimizer = torch.optim.AdamW(prepared.parameters(), lr=lr)
         import time as _time
