@@ -412,7 +412,7 @@ class EnvironmentConfig:
                         ""
                     ])
         
-        return "\\n".join(doc_lines)
+        return "\n".join(doc_lines)
     
     
     @classmethod
@@ -436,4 +436,4 @@ class EnvironmentConfig:
             config = cls.ENVIRONMENT_VARIABLES[var_name]
             summary_lines.append(f"  {var_name}: {value} (default: {config['default']})")
         
-        return "\\n".join(summary_lines)
+        return "\n".join(summary_lines)

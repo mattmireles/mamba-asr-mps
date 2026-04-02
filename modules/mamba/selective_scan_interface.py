@@ -210,7 +210,7 @@ def selective_scan(
         return final_output  # (B, L, D)
 
 
-def init_hidden(batch_size: int, d_model: int, state_dim: int, device: torch.device) -> torch.Tensor:
+def init_hidden(batch_size: int, d_model: int, state_dim: int, device: torch.device, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     """Initialize hidden state for selective scan operation.
     
     Creates the initial state tensor h0 that serves as the starting point
@@ -245,7 +245,7 @@ def init_hidden(batch_size: int, d_model: int, state_dim: int, device: torch.dev
     """
     # Use zeros initialization - standard practice for state space models
     # This provides stable gradients and avoids initial activation explosions
-    return torch.zeros(batch_size, d_model, state_dim, device=device, dtype=torch.float32)
+    return torch.zeros(batch_size, d_model, state_dim, device=device, dtype=dtype)
 
 
 def get_selective_scan_info() -> str:

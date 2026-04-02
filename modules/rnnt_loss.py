@@ -313,7 +313,7 @@ def _rnnt_loss_cpu_with_grad(
         # Slice logits and compute log_probs in place to keep autograd path
         sl = logits_cpu[b : b + 1, : Ti_eff, : (Ui_eff + 1), :].contiguous()
         lp_b = sl.log_softmax(dim=-1)
-        tgt_b = tokens_with_blank[b, 1 : 1 + Ui_eff]
+        tgt_b = tokens_with_blank[b, 1 : 1 + Ui_eff].to("cpu")
         if is_ta_functional:
             tgt_b = tgt_b.to(torch.int32).unsqueeze(0)
             Ti_t = torch.tensor([Ti_eff], dtype=torch.int32)

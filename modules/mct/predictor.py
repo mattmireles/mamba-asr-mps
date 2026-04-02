@@ -340,7 +340,8 @@ class MLPStreamingPredictor(nn.Module):
 
         combined = torch.cat([emb, prev_h], dim=-1)  # (B, E+D)
         h = self.activation(self.comb_linear(combined))  # (B, D)
-        out = self.norm(self.proj_out(h))  # (B, D)
+        h_pre = self.proj_out(h)  # (B, D) — pre-norm, matches forward() hidden
+        out = self.norm(h_pre)  # (B, D)
         out_seq = out.unsqueeze(1)  # (B, 1, D)
-        new_hidden = out.unsqueeze(0)  # (1, B, D)
+        new_hidden = h_pre.unsqueeze(0)  # (1, B, D) — store pre-norm like forward()
         return out_seq, new_hidden

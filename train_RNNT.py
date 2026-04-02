@@ -1021,9 +1021,8 @@ def main():
                     feats = feats.to(device)
                     feat_lens = feat_lens.to(device)
                     # Greedy RNN-T decode using streaming predictor
-                    enc_in = model.frontend(feats)            # (1, T', D)
-                    enc_out = model.encoder(enc_in)           # (1, T', D)
-                    Tprime = int(enc_out.shape[1])
+                    enc_out, enc_lens = model.encode_only(feats, feat_lens)
+                    Tprime = int(enc_lens[0].item())
                     hidden = None
                     token_cur = torch.zeros(1, dtype=torch.long, device=device)
                     hyp_ids: list[int] = []

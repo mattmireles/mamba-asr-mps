@@ -275,7 +275,13 @@ class ConMambaCTC(nn.Module):
         # Step 6: Compute output lengths after subsampling
         # CTC requires accurate length information for alignment
         # Clamp to minimum 1 to handle very short sequences
-        subsampling_factor = AudioConstants.TOTAL_SUBSAMPLING_FACTOR  # 4
-        output_lengths = torch.clamp(feat_lens // subsampling_factor, min=1)
+        # Compute exact output length using Conv1d formula per stage
+        k = AudioConstants.FRONTEND_KERNEL_SIZE  # 3
+        s = AudioConstants.FRONTEND_STRIDE  # 2
+        p = AudioConstants.FRONTEND_PADDING  # 1
+        lengths = feat_lens
+        for _ in range(2):  # two conv stages
+            lengths = (lengths + 2 * p - k) // s + 1
+        output_lengths = torch.clamp(lengths, min=1)
         
         return logits, output_lengths

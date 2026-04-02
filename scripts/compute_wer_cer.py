@@ -213,8 +213,20 @@ def main() -> None:
     out_rows: List[Tuple[str, str, float, float]] = []
     any_missing = False
     any_over_threshold = False
-    repo_root = Path(__file__).resolve().parents[1]
-    for tpath in sorted(repo_root.glob(args.glob)):
+    glob_pattern = Path(args.glob)
+    if glob_pattern.is_absolute():
+        # Absolute pattern: glob from the pattern's parent directory
+        glob_base = Path(glob_pattern.anchor)
+        for part in glob_pattern.parts[1:-1]:
+            candidate = glob_base / part
+            if '*' in part or '?' in part:
+                break
+            glob_base = candidate
+        glob_tail = str(glob_pattern.relative_to(glob_base))
+    else:
+        glob_base = Path(__file__).resolve().parents[1]
+        glob_tail = args.glob
+    for tpath in sorted(glob_base.glob(glob_tail)):
         hyp_text_raw = extract_text(tpath)
         if args.strict and hyp_text_raw.strip() == "":
             any_missing = True

@@ -140,8 +140,11 @@ class MambaBlock(nn.Module):
 
         # State-space parameters following Mamba initialization strategy
         # A: State transition matrix - controls information retention across time
-        # Initialized all-negative to ensure exp(Δ*A) < 1 (contractive/stable)
-        self.A = nn.Parameter(-torch.exp(torch.randn(d, n) * ModelConstants.A_INIT_SCALE))
+        # Parameterized in log-space: A = -exp(A_log) ensures A is always negative
+        # HiPPO-inspired init: diverse timescales across state dimension n
+        self.A_log = nn.Parameter(torch.log(
+            torch.arange(1, n + 1, dtype=torch.float32).unsqueeze(0).expand(d, -1).clone()
+        ))
         
         # D: Skip connection weights - enables identity mapping learning
         # Initialized to ones to preserve input information initially
@@ -162,7 +165,7 @@ class MambaBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, L, D)
         B, L, D = x.shape
-        h0 = init_hidden(B, D, self.cfg.state_dim, x.device)
+        h0 = init_hidden(B, D, self.cfg.state_dim, x.device, dtype=x.dtype)
 
         with record_function("mamba_block_projections"):
             u = self.in_proj(x)
@@ -175,11 +178,12 @@ class MambaBlock(nn.Module):
         C_proj = self.C_conv(u_t).transpose(1, 2)  # (B,L,N)
 
         delta = self.dt_proj(u)  # learned discretization step projection
+        A = -torch.exp(self.A_log)  # always negative, ensures stable SSM dynamics
         with record_function("mamba_block_selective_scan"):
             y = selective_scan(
                 x=u,
                 delta=delta,
-                A=self.A,
+                A=A,
                 B_proj=B_proj,
                 C_proj=C_proj,
                 D=self.D,

@@ -322,11 +322,20 @@ def quantization_aware_training(
             prepare_qat_pt2e as _prepare_qat_pt2e,
             convert_pt2e as _convert_pt2e,
         )
-        from torch.ao.quantization.qconfig_mapping import (
-            get_default_qat_qconfig_mapping as _get_default_qat_qconfig_mapping,
+        from torch.ao.quantization.quantizer.xnnpack_quantizer import (
+            XNNPACKQuantizer,
+            get_symmetric_quantization_config,
         )
         print("[QAT] Using PT2E API")
-        # Build a tiny example batch to drive prepare
+
+        # Frozen teacher for distillation targets
+        import copy as _copy
+        teacher_model = _copy.deepcopy(model).to(device)
+        teacher_model.train(False)
+        for p in teacher_model.parameters():
+            p.requires_grad_(False)
+
+        # Build example batch for torch.export
         example_feats = None
         example_feat_lens = None
         for batch in train_dataloader:
@@ -335,39 +344,10 @@ def quantization_aware_training(
         if example_feats is None:
             raise RuntimeError("No example batch available for PT2E QAT prepare")
 
-        # Snapshot teacher outputs before QAT modifies the model
-        teacher_cache = {}
-        def _cache_teacher(dataloader, max_batches=50):
-            model.train(False)
-            idx = 0
-            for batch in dataloader:
-                if isinstance(batch, (list, tuple)) and len(batch) == 5:
-                    f, fl, _, _, _ = batch
-                else:
-                    f, fl, _, _ = batch
-                f, fl = f.to(device), fl.to(device)
-                with torch.no_grad():
-                    enc, _ = model.encode_only(f, fl)
-                teacher_cache[idx] = enc.detach().cpu()
-                idx += 1
-                if idx >= max_batches:
-                    break
-            model.train(True)
-        _cache_teacher(train_dataloader)
-
-        # PT2E QAT requires a Quantizer, not a qconfig_mapping
-        try:
-            from torch.ao.quantization.quantizer.xnnpack_quantizer import (
-                XNNPACKQuantizer,
-                get_symmetric_quantization_config,
-            )
-            quantizer = XNNPACKQuantizer().set_global(get_symmetric_quantization_config())
-        except ImportError:
-            from torch.ao.quantization.quantizer import XNNPACKQuantizer, get_symmetric_quantization_config
-            quantizer = XNNPACKQuantizer().set_global(get_symmetric_quantization_config())
-        model_for_qat = model
-        model_for_qat.train()
-        prepared = _prepare_qat_pt2e(model_for_qat, quantizer)
+        # Export model graph, then prepare for QAT
+        exported = torch.export.export(model, (example_feats, example_feat_lens))
+        quantizer = XNNPACKQuantizer().set_global(get_symmetric_quantization_config())
+        prepared = _prepare_qat_pt2e(exported, quantizer)
 
         optimizer = torch.optim.AdamW(prepared.parameters(), lr=lr)
         import time as _time
@@ -377,7 +357,6 @@ def quantization_aware_training(
         loss_fn = nn.MSELoss()
         steps_done = 0
         for epoch in range(max(1, epochs)):
-            batch_idx = 0
             for batch in train_dataloader:
                 if isinstance(batch, (list, tuple)) and len(batch) == 5:
                     feats, feat_lens, _tokens, _token_lens, _texts = batch
@@ -385,17 +364,17 @@ def quantization_aware_training(
                     feats, feat_lens, _tokens, _token_lens = batch
                 feats = feats.to(device)
                 feat_lens = feat_lens.to(device)
-                target = teacher_cache.get(batch_idx % len(teacher_cache), teacher_cache[0]).to(device)
+                with torch.no_grad():
+                    target, _ = teacher_model.encode_only(feats, feat_lens)
                 pred, _ = prepared.encode_only(feats, feat_lens)
                 Tm = min(target.shape[1], pred.shape[1])
-                loss = loss_fn(pred[:, :Tm, :], target[:, :Tm, :].detach())
+                loss = loss_fn(pred[:, :Tm, :], target.detach()[:, :Tm, :])
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
                 total_frames += int(feat_lens.sum().item())
                 last_loss = float(loss.item())
                 steps_done += 1
-                batch_idx += 1
                 if steps_done >= 50:
                     break
             if steps_done >= 50:

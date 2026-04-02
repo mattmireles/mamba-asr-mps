@@ -293,12 +293,20 @@ class LibriSpeechCSVDataset(torch.utils.data.Dataset):
         - Skip samples exceeding maximum duration
         - Graceful handling of CSV format variations
         """
+        # Pre-build transforms once (avoid per-sample allocation)
+        self._mel_transform = torchaudio.transforms.MelSpectrogram(
+            **DatasetConstants.get_mel_config()
+        )
+        self._amp_to_db = torchaudio.transforms.AmplitudeToDB()
+
         self.rows: List[Tuple[str, float, str]] = []
         p = Path(self.manifest)
         with p.open("r", encoding="utf-8") as f:
             reader = csv.reader(f)
             header = next(reader)  # Skip header row
             for row in reader:
+                if len(row) < 3:
+                    continue
                 path = row[0]
                 # Handle missing or malformed duration values
                 dur = float(row[1]) if row[1] else 0.0
@@ -380,14 +388,11 @@ class LibriSpeechCSVDataset(torch.utils.data.Dataset):
                 # Convert to mono by averaging channels
                 wav = torch.mean(wav, dim=0, keepdim=False)
                 
-                # Extract mel-spectrogram with optimized parameters
-                mel_transform = torchaudio.transforms.MelSpectrogram(
-                    **DatasetConstants.get_mel_config()
-                )
-                mel_spec = mel_transform(wav)
-                
+                # Extract mel-spectrogram with pre-built transforms
+                mel_spec = self._mel_transform(wav)
+
                 # Convert to dB scale and transpose to time-first: (T, 80)
-                mel_db = torchaudio.transforms.AmplitudeToDB()(mel_spec).transpose(0, 1)
+                mel_db = self._amp_to_db(mel_spec).transpose(0, 1)
                 
             except Exception:
                 # Fallback to synthetic data if audio processing fails

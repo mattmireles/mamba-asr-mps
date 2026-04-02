@@ -300,11 +300,13 @@ class MCTModel(nn.Module):
         # Creates alignment matrix over time and token dimensions
         rnnt_logits = self.joiner(acoustic_encoded, linguistic_prediction)  # (B, T/4, U+1, V)
         
-        # Step 5: Compute output lengths after frontend subsampling
-        # RNN-T loss requires accurate length information
-        subsampling_factor = RNNTConstants.FRONTEND_SUBSAMPLING  # 4
-        output_lengths = torch.clamp(feat_lens // subsampling_factor, min=1)
-        
+        # Step 5: Compute output lengths using exact Conv1d formula
+        output_lengths = torch.clamp(
+            torch.tensor([self.frontend.get_output_length(int(l)) for l in feat_lens],
+                         device=feat_lens.device, dtype=feat_lens.dtype),
+            min=1,
+        )
+
         return rnnt_logits, output_lengths
 
     def encode_only(
@@ -325,8 +327,11 @@ class MCTModel(nn.Module):
         # Frontend and encoder path reused from forward()
         acoustic_features = self.frontend(feats)  # (B, T/4, D)
         acoustic_encoded = self.encoder(acoustic_features)  # (B, T/4, D)
-        subsampling_factor = RNNTConstants.FRONTEND_SUBSAMPLING  # 4
-        output_lengths = torch.clamp(feat_lens // subsampling_factor, min=1)
+        output_lengths = torch.clamp(
+            torch.tensor([self.frontend.get_output_length(int(l)) for l in feat_lens],
+                         device=feat_lens.device, dtype=feat_lens.dtype),
+            min=1,
+        )
         return acoustic_encoded, output_lengths
     
     def streaming_forward(
