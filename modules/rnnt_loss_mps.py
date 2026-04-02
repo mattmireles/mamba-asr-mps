@@ -54,9 +54,12 @@ Error Handling:
 """
 from __future__ import annotations
 
+import logging
 from typing import Tuple, Optional
 import os
 import torch
+
+logger = logging.getLogger(__name__)
 
 from modules.rnnt_loss import _rnnt_loss_cpu_with_grad
 
@@ -314,7 +317,8 @@ def rnnt_loss_mps(logits: torch.Tensor, tokens_with_blank: torch.Tensor, out_len
             loss_cpu, grad_logits = _cpu_grad_fallback(rnnt_fn, logits.detach(), tokens_with_blank, out_lens, token_lens_with_blank, blank=blank)
             return loss_cpu, grad_logits, "cpu_grad"
         return loss, None, backend
-    except Exception:
+    except Exception as e:
+        logger.warning("RNN-T backend failed: %s, falling back to cpu_grad", e)
         # CPU-grad fallback with explicit gradients
         loss_cpu, grad_logits = _cpu_grad_fallback(rnnt_fn, logits.detach(), tokens_with_blank, out_lens, token_lens_with_blank, blank=blank)
         return loss_cpu, grad_logits, "cpu_grad"

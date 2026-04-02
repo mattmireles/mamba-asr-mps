@@ -363,7 +363,7 @@ if __name__ == "__main__":
         model: nn.Module
         if args.model:
             try:
-                ckpt = torch.load(args.model, map_location="cpu")
+                ckpt = torch.load(args.model, map_location="cpu", weights_only=True)
                 cfg_kwargs = ckpt.get("config", {})
                 if not isinstance(cfg_kwargs, dict):
                     cfg_kwargs = {}

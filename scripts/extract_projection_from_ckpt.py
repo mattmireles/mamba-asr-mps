@@ -179,7 +179,7 @@ def main() -> None:
         raise SystemExit(f"Checkpoint not found: {ckpt_path}")
 
     # Load PyTorch checkpoint with flexible state dict handling
-    checkpoint_obj = torch.load(str(ckpt_path), map_location=ProjectionExtractionConstants.CHECKPOINT_LOADING_DEVICE)
+    checkpoint_obj = torch.load(str(ckpt_path), map_location=ProjectionExtractionConstants.CHECKPOINT_LOADING_DEVICE, weights_only=True)
     state_dict = checkpoint_obj.get("state_dict", checkpoint_obj)
     if not isinstance(state_dict, dict):
         raise SystemExit("Could not find state dict in checkpoint (expected dict or {'state_dict': dict})")

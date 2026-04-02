@@ -423,7 +423,7 @@ def quantization_aware_training(
             # Simple self-reconstruction loss on encoder features to exercise QAT
             with torch.no_grad():
                 target, _ = model.encode_only(feats, feat_lens)
-            pred, _ = model.encode_only(feats, feat_lens)
+            pred, _ = qmodel.mod.encode_only(feats, feat_lens)
             # Align time dim
             Tm = min(target.shape[1], pred.shape[1])
             loss = loss_fn(pred[:, :Tm, :], target[:, :Tm, :])
