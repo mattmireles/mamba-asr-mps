@@ -58,6 +58,8 @@ from typing import Tuple, Optional
 import os
 import torch
 
+from modules.rnnt_loss import _rnnt_loss_cpu_with_grad
+
 
 # =============================================================================
 # Named Constants for RNN-T Loss Configuration
@@ -169,98 +171,9 @@ def select_best_backend():
     return None, "none"
 
 
-def _cpu_grad_fallback(rnnt_fn, logits: torch.Tensor, tokens_with_blank: torch.Tensor, out_lens: torch.Tensor, token_lens_with_blank: torch.Tensor, blank: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Compute RNN-T loss on CPU with explicit gradient calculation for MPS compatibility.
-    
-    This fallback implementation handles cases where MPS-native RNN-T computation
-    fails or is unavailable. It moves tensors to CPU, computes loss with autograd,
-    and returns gradients that can be injected into the MPS computation graph.
-    
-    The per-sample processing approach ensures numerical correctness for batched
-    inputs while maintaining gradient flow for backpropagation optimization.
-    
-    Args:
-        rnnt_fn: RNN-T loss function (torchaudio.prototype.rnnt or compatible)
-                Must accept (logits, targets, input_lengths, target_lengths) signature
-        logits: Model logits tensor on MPS device
-               Shape: (batch_size, max_input_length, max_target_length, vocab_size)
-               Contains raw model predictions before softmax normalization
-        tokens_with_blank: Target token sequences including leading blank
-                          Shape: (batch_size, max_target_length)
-                          Contains token IDs with blank token at position 0
-        out_lens: Actual input sequence lengths for each batch element
-                 Shape: (batch_size,)
-                 Used to mask padding in variable-length sequences
-        token_lens_with_blank: Target sequence lengths including blank token
-                              Shape: (batch_size,)
-                              Used for proper sequence boundary handling
-        blank: Blank token ID for CTC alignment (default: 0)
-              Must match the blank token used during model training
-              
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]: (loss_tensor, gradient_tensor)
-            loss_tensor: Scalar loss value moved back to original device
-                        Ready for backpropagation in MPS computation graph
-            gradient_tensor: Gradient w.r.t. logits, same shape as input logits
-                           Pre-computed on CPU, ready for injection via .backward()
-                           
-    Cross-File Integration:
-    - Called by: rnnt_loss_mps() when MPS backend fails or autograd unavailable
-    - Calls: Backend RNN-T function (torchaudio variants, warp_rnnt)
-    - Used by: Training loops requiring stable gradient computation
-    
-    Error Handling:
-    - Zero effective sequences: Returns zero loss and zero gradients
-    - Invalid tensor shapes: Handles gracefully with bounds checking
-    - Backend failures: Propagated to caller for additional fallback strategies
-    
-    Performance Characteristics:
-    - Memory overhead: 2x logits tensor size (CPU copy + gradient storage)
-    - Computation time: 2-5x slower than native MPS due to device transfers
-    - Numerical accuracy: Identical to CPU-only training (stable baseline)
-    
-    Apple Silicon Optimization Notes:
-    - Unified memory reduces transfer overhead compared to discrete GPU systems
-    - Per-sample processing parallelizes well on high-performance CPU cores
-    - Automatic mixed precision handling preserves gradient precision
-    """
-    try:
-        from torchaudio.functional import rnnt_loss as _ta_fn  # type: ignore
-        is_ta = rnnt_fn is _ta_fn
-    except Exception:
-        is_ta = False
-    B, Tcap, Ucap, V = logits.shape
-    logits_cpu = logits.detach().to("cpu").requires_grad_(True)
-    total = None
-    used = 0
-    for b in range(B):
-        Ti = int(out_lens[b].item())
-        Ui_wb = int(token_lens_with_blank[b].item())
-        Ui = max(0, Ui_wb - 1)
-        Ti_eff = min(Ti, Tcap)
-        Ui_eff = min(Ui, max(0, Ucap - 1))
-        if Ti_eff <= 0 or Ui_eff <= 0:
-            continue
-        sl = logits_cpu[b : b + 1, : Ti_eff, : (Ui_eff + 1), :].contiguous()
-        lp = sl.log_softmax(dim=-1)
-        tgt = tokens_with_blank[b, 1 : 1 + Ui_eff]
-        if is_ta:
-            tgt = tgt.to(torch.int32).unsqueeze(0)
-            Tl = torch.tensor([Ti_eff], dtype=torch.int32)
-            Ul = torch.tensor([Ui_eff], dtype=torch.int32)
-        else:
-            tgt = tgt.unsqueeze(0)
-            Tl = torch.tensor([Ti_eff], dtype=torch.long)
-            Ul = torch.tensor([Ui_eff], dtype=torch.long)
-        loss_b = rnnt_fn(lp, tgt, Tl, Ul, blank=blank, clamp=-1, reduction="mean")
-        total = loss_b if total is None else total + loss_b
-        used += 1
-    if used == 0:
-        return torch.zeros((), device=logits.device), torch.zeros_like(logits)
-    total = total / used
-    total.backward()
-    grad_logits = logits_cpu.grad.to(logits.device)
-    return total.to(logits.device).detach(), grad_logits.detach()
+## _cpu_grad_fallback is now provided by the shared rnnt_loss module.
+## Alias preserves the local name used by rnnt_loss_mps() below.
+_cpu_grad_fallback = _rnnt_loss_cpu_with_grad
 
 
 def rnnt_loss_mps(logits: torch.Tensor, tokens_with_blank: torch.Tensor, out_lens: torch.Tensor, token_lens_with_blank: torch.Tensor, blank: int = 0, max_align: Optional[int] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor], str]:
