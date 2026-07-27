@@ -18,6 +18,11 @@
  * - Memory efficiency: Unified memory architecture benefits on Apple Silicon
  *
  * Model Interface Contract:
+ * - Direct CTC (`--contract`): audio_chunk(1,C+8,80) +
+ *   mamba_states_in(L,1,D,N) → logits(1,C/4,29) +
+ *   mamba_states_out(L,1,D,N). The JSON contract owns every shape and name.
+ * - Legacy MCT (no `--contract`): retained for compatibility with the older
+ *   token/predictor flags.
  * - Inputs: audio_chunk(1,T,F), token_in(1,1), predictor_hidden_in(1,1,D)
  * - Outputs: logits_time(1,T',1,V), predictor_hidden_out(1,1,D)
  * - State flow: hidden_out from one call becomes hidden_in for the next
@@ -187,7 +192,7 @@ func ctcBeamUpdateAMXGlobal(
 // MARK: - vDSP Mel Spectrogram (minimal, CPU)
 
 /// Generate a simple synthetic mono waveform (sum of sines) for testing.
-private func generateSyntheticAudio(sampleRate: Int, samples: Int) -> [Float] {
+func generateSyntheticAudio(sampleRate: Int, samples: Int) -> [Float] {
     var signal = [Float](repeating: 0, count: samples)
     let freqs: [Float] = [220.0, 440.0, 880.0]
     for n in 0..<samples {
@@ -202,7 +207,7 @@ private func generateSyntheticAudio(sampleRate: Int, samples: Int) -> [Float] {
 }
 
 /// Create mel filterbank matrix of shape (numMels, fftBins) in row-major order.
-private func makeMelFilterbank(sampleRate: Int, nFFT: Int, numMels: Int, fMin: Float = 0, fMax: Float? = nil) -> [Float] {
+func makeMelFilterbank(sampleRate: Int, nFFT: Int, numMels: Int, fMin: Float = 0, fMax: Float? = nil) -> [Float] {
     let fmax = fMax ?? Float(sampleRate) / 2.0
     let melMin: Float = 2595.0 * log10(1 + fMin / 700.0)
     let melMax: Float = 2595.0 * log10(1 + fmax / 700.0)
@@ -232,51 +237,61 @@ private func makeMelFilterbank(sampleRate: Int, nFFT: Int, numMels: Int, fMin: F
 }
 
 /// Compute log-mel spectrogram using vDSP FFT and filterbank.
-private func computeLogMelSpectrogram(signal: [Float], sampleRate: Int, nFFT: Int = 512, winLength: Int = 400, hopLength: Int = 160, numMels: Int = 80, numFrames: Int) -> [Float] {
-    let fft = vDSP.FFT(log2n: vDSP_Length(log2(Float(nFFT))), radix: .radix2, ofType: DSPSplitComplex.self)!
-    var window = [Float](repeating: 0, count: winLength)
-    vDSP_hann_window(&window, vDSP_Length(winLength), Int32(vDSP_HANN_NORM))
+func computeLogMelSpectrogram(signal: [Float], sampleRate: Int, nFFT: Int = 512, winLength: Int = 400, hopLength: Int = 160, numMels: Int = 80, numFrames: Int) -> [Float] {
+    guard let dft = vDSP_DFT_zop_CreateSetup(
+        nil,
+        vDSP_Length(nFFT),
+        vDSP_DFT_Direction.FORWARD
+    ) else {
+        return []
+    }
+    defer { vDSP_DFT_DestroySetup(dft) }
+
+    // torch.hann_window(winLength, periodic: true)
+    let window = (0..<winLength).map { index in
+        0.5 - 0.5 * cosf(2.0 * .pi * Float(index) / Float(winLength))
+    }
     let fftBins = nFFT / 2 + 1
     let fb = makeMelFilterbank(sampleRate: sampleRate, nFFT: nFFT, numMels: numMels)
     var melFeatures = [Float](repeating: 0, count: numFrames * numMels)
-
-    var real = [Float](repeating: 0, count: nFFT/2)
-    var imag = [Float](repeating: 0, count: nFFT/2)
+    let inputImag = [Float](repeating: 0, count: nFFT)
+    var outputReal = [Float](repeating: 0, count: nFFT)
+    var outputImag = [Float](repeating: 0, count: nFFT)
     var frameBuffer = [Float](repeating: 0, count: nFFT)
+    let windowOffset = (nFFT - winLength) / 2
 
-    real.withUnsafeMutableBufferPointer { rbuf in
-        imag.withUnsafeMutableBufferPointer { ibuf in
-            var split = DSPSplitComplex(realp: rbuf.baseAddress!, imagp: ibuf.baseAddress!)
-            for t in 0..<numFrames {
-                let start = t * hopLength
-                if start + winLength > signal.count { break }
-                // Windowed frame into frameBuffer
-                for i in 0..<winLength { frameBuffer[i] = signal[start + i] * window[i] }
-                if winLength < nFFT { for i in winLength..<nFFT { frameBuffer[i] = 0 } }
-                // Real-to-complex FFT
-                frameBuffer.withUnsafeBytes { raw -> Void in
-                    let ptr = raw.bindMemory(to: Float.self).baseAddress!
-                    ptr.withMemoryRebound(to: DSPComplex.self, capacity: nFFT/2) { complexPtr in
-                        vDSP_ctoz(complexPtr, 2, &split, 1, vDSP_Length(nFFT/2))
-                    }
-                }
-                fft.forward(input: split, output: &split)
-                // Power spectrum (first fftBins)
-                var power = [Float](repeating: 0, count: fftBins)
-                power[0] = rbuf[0] * rbuf[0]
-                for k in 1..<(fftBins) {
-                    let r = rbuf[k - 1]
-                    let im = ibuf[k - 1]
-                    power[k] = r*r + im*im
-                }
-                // Multiply by mel filterbank
-                for m in 0..<numMels {
-                    var acc: Float = 0
-                    let rowOffset = m * fftBins
-                    vDSP_dotpr(power, 1, Array(fb[rowOffset..<(rowOffset+fftBins)]), 1, &acc, vDSP_Length(fftBins))
-                    melFeatures[t * numMels + m] = log(max(acc, 1e-6))
-                }
+    for t in 0..<numFrames {
+        let start = t * hopLength
+        if start + nFFT > signal.count { break }
+        for i in 0..<winLength {
+            frameBuffer[windowOffset + i] =
+                signal[start + windowOffset + i] * window[i]
+        }
+        vDSP_DFT_Execute(
+            dft,
+            frameBuffer,
+            inputImag,
+            &outputReal,
+            &outputImag
+        )
+        var power = [Float](repeating: 0, count: fftBins)
+        for k in 0..<fftBins {
+            power[k] = outputReal[k] * outputReal[k] + outputImag[k] * outputImag[k]
+        }
+        for m in 0..<numMels {
+            var acc: Float = 0
+            let rowOffset = m * fftBins
+            fb.withUnsafeBufferPointer { buffer in
+                vDSP_dotpr(
+                    power,
+                    1,
+                    buffer.baseAddress! + rowOffset,
+                    1,
+                    &acc,
+                    vDSP_Length(fftBins)
+                )
             }
+            melFeatures[t * numMels + m] = log(max(acc, 1e-6))
         }
     }
     return melFeatures
@@ -285,7 +300,7 @@ private func computeLogMelSpectrogram(signal: [Float], sampleRate: Int, nFFT: In
 // MARK: - Audio Loading (WAV 16k mono expected)
 
 /// Load a WAV file into mono Float samples at 16kHz. If format mismatches, returns nil.
-private func loadWavMono16k(path: String) -> [Float]? {
+func loadWavMono16k(path: String) -> [Float]? {
     let url = URL(fileURLWithPath: path)
     do {
         let file = try AVAudioFile(forReading: url)
@@ -1263,14 +1278,14 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
     if let path = wavPath, let wav = loadWavMono16k(path: path) {
         signal = wav
     } else {
-        let chunkSamples = (Tchunk - 1) * hop + win
+        let chunkSamples = (Tchunk - 1) * hop + nfft
         let chunkSeconds = Double(chunkSamples) / Double(sampleRate)
         let targetChunks = (durationSeconds > 0) ? max(3, Int(ceil(Double(durationSeconds) / chunkSeconds))) : 3
-        let totalSamples = (Tchunk * targetChunks - 1) * hop + win
+        let totalSamples = (Tchunk * targetChunks - 1) * hop + nfft
         signal = generateSyntheticAudio(sampleRate: sampleRate, samples: totalSamples)
     }
     // Compute total frames available
-    let totalFrames = max(0, (signal.count - win) / hop + 1)
+    let totalFrames = max(0, (signal.count - nfft) / hop + 1)
     if totalFrames < Tchunk {
         print("[warn] Not enough frames (\(totalFrames)) for one chunk (\(Tchunk)).")
     }
@@ -1308,7 +1323,7 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
     if totalFrames > 0 && totalFrames < Tchunk {
         // Slice entire signal window, compute mel with numFrames = totalFrames, then pad to Tchunk
         let startSample = 0
-        let endSample = min(signal.count, startSample + (Tchunk - 1) * hop + win)
+        let endSample = min(signal.count, startSample + (Tchunk - 1) * hop + nfft)
         let slice = Array(signal[startSample..<endSample])
         var mel = computeLogMelSpectrogram(
             signal: slice,
@@ -1426,7 +1441,7 @@ private func runStreaming(model: MLModel, wavPath: String?, durationSeconds: Int
         }
         // Slice signal region for this chunk and compute mel for exactly Tchunk frames
         let startSample = frameIndex * hop
-        let endSample = startSample + (Tchunk - 1) * hop + win
+        let endSample = startSample + (Tchunk - 1) * hop + nfft
         if endSample > signal.count { break }
         let slice = Array(signal[startSample..<endSample])
         let mel = computeLogMelSpectrogram(signal: slice, sampleRate: sampleRate, nFFT: nfft, winLength: win, hopLength: hop, numMels: numMels, numFrames: Tchunk)
@@ -1712,6 +1727,7 @@ var benchIters: Int = 0
 var computeMode: String = ProcessInfo.processInfo.environment["MAMBA_COMPUTE_DEFAULT"]?.lowercased() ?? "cpu"  // all | cpu | cpu-gpu
 var useAMXBeam: Bool = false
 var chunkLengthOverride: Int? = nil
+var contractPath: String? = nil
 var restrictVocabCap: Int? = nil  // If set, restrict decoding to ids < cap
 var projectMod29: Bool = false     // If true with restrict 29, project argmax id % 29
 var projectionMatrixPath: String? = nil // If provided, use 1024x29 proj for pooled decode
@@ -1760,6 +1776,8 @@ while i < commandLineArguments.count {
         if i + 1 < commandLineArguments.count { computeMode = commandLineArguments[i+1].lowercased(); i += 1 }
     case "--chunk":
         if i + 1 < commandLineArguments.count { chunkLengthOverride = Int(commandLineArguments[i+1]); i += 1 }
+    case "--contract":
+        if i + 1 < commandLineArguments.count { contractPath = commandLineArguments[i+1]; i += 1 }
     case "--beam-amx":
         useAMXBeam = true
     case "--restrict-vocab":
@@ -1818,6 +1836,19 @@ do {
         let ms = (t1 - t0) * 1000.0
         print(String(format: "🧪 Beam micro-bench: V=%d K=%d topK=%d iters=%d → %.2f ms total, %.4f ms/iter", V, K, topK, benchIters, ms, ms / Double(benchIters)))
     } else {
+        // The direct CTC path is contract-driven. Parse and validate before
+        // compiling the model so chunk/vocab/mel mismatches fail immediately.
+        let ctcContract: CTCContract?
+        if let path = contractPath, !path.isEmpty {
+            ctcContract = try loadCTCContract(
+                path: path,
+                chunkOverride: chunkLengthOverride
+            )
+            print("Loaded CTC contract: \(path)")
+        } else {
+            ctcContract = nil
+        }
+
         // Attempt to load pre-compiled model for optimal performance
         let compiledModelURL = URL(fileURLWithPath: compiledModelPath)
         let validationModel: MLModel
@@ -1845,7 +1876,16 @@ do {
         }
         
         // Execute validation: single inference or streaming
-        if doStream {
+        if let contract = ctcContract {
+            _ = try runCTCStreaming(
+                model: validationModel,
+                contract: contract,
+                wavPath: wavPath,
+                durationSeconds: durationSeconds,
+                warmupCount: warmupCount,
+                latencyCSVPath: latencyCsvPath
+            )
+        } else if doStream {
         if let list = beamList, !list.isEmpty {
             for b in list {
                 beamWidth = max(1, b)
@@ -1868,7 +1908,7 @@ do {
 } catch {
     // Comprehensive error reporting for debugging deployment issues
     print("❌ MambaASR validation failed with error:")
-    fputs("Error: \(error)\n", stderr)
+    fputs("Error: \(error.localizedDescription)\n", stderr)
     print("\n🔧 Troubleshooting:")
     print("1. Verify model paths exist: \(mlpackagePath), \(compiledModelPath)")
     print("2. Ensure Core ML model was exported correctly from Python")

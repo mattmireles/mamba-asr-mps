@@ -1,394 +1,342 @@
-"""
-Core ML export pipeline for Mamba-ASR deployment on Apple Neural Engine.
-
-This module handles the conversion of optimized PyTorch MCT models to Core ML format,
-specifically targeting the Apple Neural Engine (ANE) for high-performance on-device
-speech recognition. The pipeline creates stateful Core ML models that efficiently
-manage Mamba's recurrent state for streaming inference.
-
-Core ML Integration Strategy:
-- Stateful models: Core ML StateType for efficient Mamba state management
-- ANE optimization: Operation mapping for Neural Engine acceleration
-- Streaming support: Chunk-based processing for real-time inference
-- Quantization: INT8/INT4 model support for memory efficiency
-
-Apple Neural Engine Targeting:
-- Operation compatibility: Ensure all ops supported by ANE
-- Tensor shapes: Optimize dimensions for ANE execution units
-- Memory layout: Efficient tensor formats for Neural Engine
-- Fallback minimization: Maximize ANE utilization, minimize CPU/GPU fallback
-
-Stateful Model Design:
-- State management: Core ML runtime handles Mamba hidden states
-- Streaming interface: Chunk-based audio processing
-- State persistence: Efficient state transfer between inference calls
-- Memory optimization: Minimal state storage overhead
-
-Phase 3 Integration:
-- Input: Optimized MCT models from scripts/optimize.py
-- Processing: PyTorch to Core ML conversion with ANE optimization
-- Output: .mlpackage files ready for iOS/macOS deployment
-
-Swift Runtime Integration:
-- MambaASRRunner: Swift CLI for validating exported Core ML models with CTC beam search
-- Production apps: Integration points for iOS/macOS speech recognition with vocabulary support
-- Performance validation: Apple Silicon inference benchmarking with latency CSV export
-- Model deployment: Ready-to-use .mlpackage/.mlmodelc for app bundles
-- Validation: ANE execution verification with streaming inference and transcript generation
-- Decoding algorithms: Support for both greedy and beam search decoding modes
-
-Conversion Pipeline:
-1. Model preparation: Load optimized PyTorch MCT model
-2. Graph tracing: Create TorchScript representation with example inputs
-3. State definition: Configure Mamba states as Core ML StateType
-4. Conversion: Transform to Core ML with ANE-specific optimizations
-5. Validation: Verify ANE execution and performance characteristics
-
-Performance Targets:
-- ANE utilization: >90% of operations running on Neural Engine
-- Inference latency: <10ms for 10-second audio chunks
-- Memory efficiency: Minimal state storage overhead
-- Accuracy preservation: <1% degradation from PyTorch model
-
-Usage Examples:
-    # Basic conversion
-    python scripts/export_coreml.py --model optimized_mct.pth --output MambaASR.mlpackage
-    
-    # With custom chunk size
-    python scripts/export_coreml.py --model model.pth --chunk_length 512 --output model.mlpackage
-    
-    # Quantized model export
-    python scripts/export_coreml.py --model quantized_model.pth --quantized --output model_int8.mlpackage
-
-Core ML Features:
-- ML Program format: Modern Core ML representation
-- StateType support: Efficient recurrent state management
-- Compute unit targeting: ANE, GPU, CPU optimization
-- iOS/macOS deployment: Universal deployment target support
-
-Integration Points:
-- Input: Optimized models from knowledge distillation, QAT, or pruning
-- Output: .mlpackage files for iOS/macOS integration
-- Validates with: Xcode performance analysis and ANE execution verification
-- Prepares for: Phase 4 Swift application integration
-
-References:
-- Core ML Tools: Apple's official ML model conversion toolkit
-- StateType documentation: Core ML stateful model guide
-- ANE optimization: Apple Neural Engine programming guide
-- mlpackage format: Modern Core ML model package specification
-"""
+#!/usr/bin/env python3
+"""Export the direct 29-logit ConMamba CTC streaming contract to Core ML."""
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
+import shutil
+from pathlib import Path
+from typing import Dict, Optional, Tuple
+
 os.environ.setdefault("MAMBA_DISABLE_RECORD_FUNCTION", "1")
+
+import numpy as np
 import torch
 import torch.nn as nn
 
-# Core ML Tools is optional during development; wrap import for graceful fallback
 try:
     import coremltools as ct  # type: ignore
-    HAS_CT = True
-except Exception:
-    HAS_CT = False
+except Exception as exc:  # pragma: no cover - exercised by full-stack installs
+    raise SystemExit(f"coremltools is required for export: {exc}")
+
+from datasets.librispeech_csv import DatasetConstants
+from modules.Conmamba import AudioConstants, ConMambaCTC, ConMambaCTCConfig
+from utils.tokenizer import CharTokenizer
 
 
-# Core ML Export Configuration Constants
-class CoreMLConstants:
-    """Named constants for Core ML export pipeline configuration.
-    
-    These constants define the conversion parameters optimized for
-    Apple Neural Engine deployment and streaming inference.
-    """
-    
-    # Model Configuration
-    DEFAULT_CHUNK_LENGTH = int(os.environ.get("MAMBA_CHUNK_DEFAULT", "256"))      # Audio chunk length for streaming (frames)
-    DEFAULT_FEATURE_DIM = 80        # Mel-spectrogram feature dimension
-    DEFAULT_MODEL_DIM = 256         # MCT model hidden dimension
-    DEFAULT_STATE_DIM = 16          # Mamba state space dimension
-    DEFAULT_VOCAB_SIZE = 1024       # Character vocabulary size
-    
-    # Core ML Optimization
-    ML_PROGRAM_FORMAT = "mlprogram"  # Modern Core ML format
-    MINIMUM_IOS_VERSION = "iOS16"    # Minimum deployment target
-    MINIMUM_MACOS_VERSION = "macOS13" # Minimum macOS deployment target
-    
-    # Apple Neural Engine Optimization
-    TARGET_ANE_UTILIZATION = 0.9    # 90% operations on ANE target
-    MAX_ACCEPTABLE_FALLBACK = 0.1   # 10% max CPU/GPU fallback
-    
-    # Performance Targets
-    MAX_INFERENCE_LATENCY = 0.01    # 10ms latency target
-    MAX_MEMORY_OVERHEAD = 0.05      # 5% memory overhead for state management
-    MAX_ACCURACY_DEGRADATION = 0.01 # 1% max accuracy loss from PyTorch
-    
-    # Streaming Configuration
-    AUDIO_SAMPLE_RATE = 16000       # Standard speech recognition sample rate
-    HOP_LENGTH = 160                # STFT hop length (10ms at 16kHz)
-    
-    @staticmethod
-    def get_coreml_info() -> str:
-        """Return Core ML export configuration documentation."""
-        return f"""
-        Core ML Export Configuration:
-        
-        Model Parameters:
-        - Chunk length: {CoreMLConstants.DEFAULT_CHUNK_LENGTH} frames
-        - Feature dimension: {CoreMLConstants.DEFAULT_FEATURE_DIM} (mel features)
-        - Model dimension: {CoreMLConstants.DEFAULT_MODEL_DIM}
-        - State dimension: {CoreMLConstants.DEFAULT_STATE_DIM}
-        
-        Deployment Targets:
-        - Format: {CoreMLConstants.ML_PROGRAM_FORMAT}
-        - iOS: {CoreMLConstants.MINIMUM_IOS_VERSION}+
-        - macOS: {CoreMLConstants.MINIMUM_MACOS_VERSION}+
-        
-        Performance Targets:
-        - ANE utilization: {CoreMLConstants.TARGET_ANE_UTILIZATION:.1%}
-        - Max fallback: {CoreMLConstants.MAX_ACCEPTABLE_FALLBACK:.1%}
-        - Latency: <{CoreMLConstants.MAX_INFERENCE_LATENCY*1000:.0f}ms
-        - Accuracy preservation: >{(1-CoreMLConstants.MAX_ACCURACY_DEGRADATION):.1%}
-        """
+DEFAULT_CHUNK_FRAMES = int(os.environ.get("MAMBA_CHUNK_DEFAULT", "256"))
+DEFAULT_D_MODEL = 256
+DEFAULT_N_BLOCKS = 6
+SCHEMA_VERSION = 1
 
 
-def export_to_coreml(
-    pytorch_model: nn.Module,
-    output_path: str = "MambaASR.mlpackage",
-    chunk_length: int = CoreMLConstants.DEFAULT_CHUNK_LENGTH,
-    feature_dim: int = CoreMLConstants.DEFAULT_FEATURE_DIM,
-    d_model: int = CoreMLConstants.DEFAULT_MODEL_DIM,
-    d_state: int = CoreMLConstants.DEFAULT_STATE_DIM,
-    backend: str = "mlprogram",  # or "neuralnetwork"
-    use_fp16: bool = False,
-    use_w8: bool = False,
-    compute_units: str = "cpu",   # all | cpu | cpu-gpu | cpu-ne (CPU-first by default)
-    export_no_rnn: bool = False,
-):
-    """Convert optimized PyTorch MCT model to stateful Core ML package for ANE deployment.
-    
-    Transforms trained and optimized MCT models into Core ML format specifically
-    designed for Apple Neural Engine execution. Creates stateful models that
-    efficiently manage Mamba's recurrent state for streaming speech recognition.
-    
-    Stateful Core ML Design:
-    - StateType integration: Mamba hidden states managed by Core ML runtime
-    - Chunk-based processing: Streaming inference with configurable chunk sizes
-    - State persistence: Efficient state transfer between inference calls
-    - Memory optimization: Minimal overhead for state management
-    
-    Apple Neural Engine Optimization:
-    - Operation mapping: Ensure all operations supported by ANE
-    - Tensor shapes: Optimize dimensions for ANE execution units
-    - Memory layouts: Efficient tensor formats for Neural Engine
-    - Fallback minimization: Maximize ANE utilization
-    
-    Args:
-        pytorch_model: Trained MCT model from optimization pipeline
-        output_path: Path for saved .mlpackage file
-        chunk_length: Audio chunk length in frames for streaming inference
-        feature_dim: Input mel-spectrogram feature dimension
-        d_model: MCT model hidden dimension
-        d_state: Mamba state space dimension
-        
-    Returns:
-        None (saves .mlpackage file to specified path)
-        
-    Conversion Process:
-    1. Model preparation: Set model to evaluation mode
-    2. Example inputs: Create representative tensors for tracing
-    3. Graph tracing: Generate TorchScript representation
-    4. State definition: Configure Mamba states as Core ML StateType
-    5. Input/output specification: Define model interface for Core ML
-    6. Conversion: Transform to Core ML with ANE optimizations
-    7. Validation: Verify model correctness and ANE execution
-    8. Export: Save .mlpackage file for deployment
-    
-    Core ML Model Interface:
-    - Inputs: audio_chunk (B, T, F), mamba_state_in (StateType)
-    - Outputs: logits (B, T, vocab_size), mamba_state_out (StateType)
-    - StateType: Enables efficient recurrent state management
-    - Chunk processing: Supports real-time streaming inference
-    
-    ANE Compatibility Checks:
-    - Operation support: Verify all ops have ANE implementations
-    - Tensor shapes: Ensure compatibility with ANE execution units
-    - Memory access: Optimize for ANE memory bandwidth
-    - Precision: Support for quantized models (INT8/INT4)
-    
-    Performance Validation:
-    - ANE utilization: Verify >90% operations run on Neural Engine
-    - Latency measurement: Confirm <10ms inference time
-    - Memory efficiency: Validate minimal state storage overhead
-    - Accuracy preservation: Ensure <1% degradation from PyTorch
-    
-    Deployment Considerations:
-    - iOS compatibility: Target iOS 16+ for full feature support
-    - macOS compatibility: Target macOS 13+ for ANE availability
-    - Model size: Optimized for on-device storage constraints
-    - Privacy: Entirely on-device processing for data privacy
-    
-    Streaming Inference Design:
-    - Chunk-based: Process audio in configurable chunks
-    - State management: Efficient transfer of hidden states
-    - Real-time capable: Low-latency processing for live audio
-    - Memory efficient: Minimal memory footprint for mobile devices
-    
-    Integration Points:
-    - Input: Optimized models from scripts/optimize.py pipeline
-    - Output: .mlpackage files for iOS/macOS Swift integration
-    - Validates with: Xcode performance analysis tools
-    - Prepares for: Phase 4 native Swift application development
-    
-    Error Handling:
-    - Tracing failures: Fallback strategies for complex models
-    - ANE incompatibility: Graceful fallback to GPU/CPU execution
-    - Shape mismatches: Clear error messages for debugging
-    - Memory constraints: Validation of memory requirements
-    """
-    if not HAS_CT:
-        print("coremltools not available; skipping conversion. Install coremltools to enable export.")
-        return
-    print(f"Starting Core ML export to {output_path}...")
-    pytorch_model.eval()
+class StreamingCTCWrapper(nn.Module):
+    """Flat tensor-I/O wrapper consumed by Core ML and the Swift runner."""
 
-    # 1. Trace the model with example inputs (stateful streaming wrapper)
-    example_audio = torch.rand(1, chunk_length, feature_dim)
-    example_token = torch.zeros(1, 1, dtype=torch.long)
-    # Predictor GRU hidden state: (num_layers=1, batch=1, hidden=d_model)
-    example_hidden = torch.zeros(1, 1, d_model)
+    def __init__(self, model: ConMambaCTC):
+        super().__init__()
+        self.model = model
 
-    # Optionally replace GRU/LSTM predictor with export-friendly MLP for ANE
-    if export_no_rnn:
-        try:
-            from modules.mct.mct_model import MCTModel  # type: ignore
-            if isinstance(pytorch_model, MCTModel):
-                cfg = pytorch_model.cfg
-                alt = MCTModel(cfg, export_no_rnn=True)
-                # Copy compatible weights
-                alt.frontend.load_state_dict(pytorch_model.frontend.state_dict(), strict=False)
-                alt.encoder.load_state_dict(pytorch_model.encoder.state_dict(), strict=False)
-                alt.joiner.load_state_dict(pytorch_model.joiner.state_dict(), strict=False)
-                pytorch_model = alt
-        except Exception:
-            pass
+    def forward(
+        self,
+        audio_chunk: torch.Tensor,
+        mamba_states_in: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.model.streaming_forward(audio_chunk, mamba_states_in)
 
-    class StatefulWrapper(nn.Module):
-        def __init__(self, model: nn.Module):
-            super().__init__()
-            self.model = model
 
-        def forward(self, audio_chunk: torch.Tensor, token_in: torch.Tensor, predictor_hidden: torch.Tensor):
-            logits_time, new_hidden = self.model.streaming_forward(audio_chunk, token_in, predictor_hidden)
-            return logits_time, new_hidden
+def _checkpoint_payload(path: Path) -> Dict:
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, dict):
+        raise ValueError(f"checkpoint must contain a dictionary: {path}")
+    return payload
 
-    wrapped_model = StatefulWrapper(pytorch_model)
-    traced_model = torch.jit.trace(wrapped_model, (example_audio, example_token, example_hidden))
 
-    # 2. Define the inputs and outputs for the Core ML model
-    # Inputs will include the audio chunk and the input state.
-    coreml_inputs = [
-        ct.TensorType(name="audio_chunk", shape=example_audio.shape),
-        ct.TensorType(name="token_in", shape=(1, 1)),
-        ct.TensorType(name="predictor_hidden_in", shape=example_hidden.shape),
+def load_ctc_model(
+    checkpoint: Optional[Path],
+    d_model: int,
+    n_blocks: int,
+    seed: int,
+) -> Tuple[ConMambaCTC, Dict, Optional[Path]]:
+    """Load trained weights or create a deterministic random reference model."""
+    checkpoint_config: Dict = {}
+    if checkpoint is not None:
+        payload = _checkpoint_payload(checkpoint)
+        raw_config = payload.get("config", {})
+        checkpoint_config = raw_config if isinstance(raw_config, dict) else {}
+        d_model = int(checkpoint_config.get("d_model", d_model))
+        n_blocks = int(checkpoint_config.get("n_blocks", n_blocks))
+    else:
+        torch.manual_seed(seed)
+
+    config = ConMambaCTCConfig(
+        d_model=d_model,
+        n_blocks=n_blocks,
+        vocab_size=29,
+    )
+    model = ConMambaCTC(config).eval().float().cpu()
+
+    if checkpoint is not None:
+        payload = _checkpoint_payload(checkpoint)
+        state_dict = payload.get("state_dict", payload.get("model_state"))
+        if not isinstance(state_dict, dict):
+            raise ValueError(
+                f"checkpoint has no direct ConMamba state_dict/model_state: {checkpoint}"
+            )
+        model.load_state_dict(state_dict, strict=True)
+
+    return model, checkpoint_config, checkpoint
+
+
+def _relative_reference(reference: Path, contract_path: Path) -> str:
+    return os.path.relpath(reference.resolve(), contract_path.parent.resolve())
+
+
+def write_random_reference(
+    model: ConMambaCTC,
+    output_path: Path,
+    seed: int,
+) -> Path:
+    """Persist the exact random weights used by the parity gate."""
+    reference_path = output_path.with_suffix(".reference.pt")
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "config": {
+                "d_model": model.cfg.d_model,
+                "n_blocks": model.cfg.n_blocks,
+                "vocab_size": model.cfg.vocab_size,
+            },
+            "seed": seed,
+        },
+        reference_path,
+    )
+    return reference_path
+
+
+def build_contract(
+    model: ConMambaCTC,
+    chunk_frames: int,
+    reference_path: Path,
+    contract_path: Path,
+    precision: str,
+) -> Dict:
+    """Build the single source of truth read by Python and Swift."""
+    tokenizer = CharTokenizer()
+    vocab = [""] + [tokenizer.id_to_char[index] for index in range(1, 29)]
+    output_frames = chunk_frames
+    for _ in range(2):
+        output_frames = (output_frames + 1) // 2
+    state_shape = [
+        model.cfg.n_blocks,
+        1,
+        model.cfg.d_model,
+        AudioConstants.MAMBA_STATE_DIM,
     ]
+    mel = DatasetConstants.get_mel_config()
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "modelType": "ctc29",
+        "precision": precision,
+        "referenceCheckpoint": _relative_reference(reference_path, contract_path),
+        "model": {
+            "dModel": model.cfg.d_model,
+            "nBlocks": model.cfg.n_blocks,
+            "stateDim": AudioConstants.MAMBA_STATE_DIM,
+            "vocabSize": model.cfg.vocab_size,
+            "timeReduction": AudioConstants.TOTAL_SUBSAMPLING_FACTOR,
+        },
+        "streaming": {
+            "chunkFrames": chunk_frames,
+            "outputFrames": output_frames,
+            "boundaryPolicy": "causal-conv-left-context-carry-mamba",
+            "convContextFrames": AudioConstants.CONV_CONTEXT_FRAMES,
+        },
+        "mel": {
+            "sampleRate": mel["sample_rate"],
+            "nFFT": mel["n_fft"],
+            "winLength": mel["win_length"],
+            "hopLength": mel["hop_length"],
+            "nMels": mel["n_mels"],
+            "fMin": mel["f_min"],
+            "fMax": mel["f_max"],
+            "center": mel["center"],
+            "power": mel["power"],
+            "melScale": mel["mel_scale"],
+            "norm": mel["norm"],
+            "logScale": "natural",
+            "logFloor": DatasetConstants.LOG_FLOOR,
+            "window": "hann_periodic",
+        },
+        "vocab": vocab,
+        "io": {
+            "audioInput": "audio_chunk",
+            "stateInput": "mamba_states_in",
+            "logitsOutput": "logits",
+            "stateOutput": "mamba_states_out",
+            "audioShape": [
+                1,
+                chunk_frames + AudioConstants.CONV_CONTEXT_FRAMES,
+                DatasetConstants.N_MELS,
+            ],
+            "stateShape": state_shape,
+            "logitsShape": [1, output_frames, model.cfg.vocab_size],
+        },
+    }
 
-    # Outputs will include the transcription logits and the output state.
-    # The output state from one prediction will be fed as the input state
-    # to the next.
-    coreml_outputs = [
-        ct.TensorType(name="logits_time"),
-        ct.TensorType(name="predictor_hidden_out"),
-    ]
+
+def package_sha256(package_path: Path) -> str:
+    """Hash package files deterministically for traceable validation output."""
+    digest = hashlib.sha256()
+    for path in sorted(p for p in package_path.rglob("*") if p.is_file()):
+        digest.update(str(path.relative_to(package_path)).encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
-    # 3. Convert the model
-    # `convert_to="mlprogram"` is the modern format.
-    # `compute_units=ct.ComputeUnit.ALL` allows Core ML to use the ANE, GPU, and CPU.
-    # The `states` parameter is what makes the model stateful.
-    convert_kwargs = dict(
-        inputs=coreml_inputs,
-        outputs=coreml_outputs,
-        convert_to=backend,
-        compute_units={
-            "all": ct.ComputeUnit.ALL,
-            "cpu": ct.ComputeUnit.CPU_ONLY,
-            "cpu-gpu": ct.ComputeUnit.CPU_AND_GPU,
-            "cpu-ne": getattr(ct.ComputeUnit, "CPU_AND_NE", ct.ComputeUnit.ALL),
-        }.get(compute_units, ct.ComputeUnit.ALL),
+def export_ctc_model(
+    model: ConMambaCTC,
+    output_path: Path,
+    contract_path: Path,
+    reference_path: Path,
+    chunk_frames: int,
+    use_fp16: bool,
+    compute_units: str,
+) -> None:
+    """Trace, convert, save, and describe one fixed-shape CTC package."""
+    state_shape = (
+        model.cfg.n_blocks,
+        1,
+        model.cfg.d_model,
+        AudioConstants.MAMBA_STATE_DIM,
+    )
+    example_audio = torch.zeros(
+        1,
+        chunk_frames + AudioConstants.CONV_CONTEXT_FRAMES,
+        DatasetConstants.N_MELS,
+    )
+    example_states = torch.zeros(state_shape)
+    traced = torch.jit.trace(
+        StreamingCTCWrapper(model).eval(),
+        (example_audio, example_states),
+        strict=False,
+    )
+
+    units = {
+        "all": ct.ComputeUnit.ALL,
+        "cpu": ct.ComputeUnit.CPU_ONLY,
+        "cpu-gpu": ct.ComputeUnit.CPU_AND_GPU,
+        "cpu-ne": getattr(ct.ComputeUnit, "CPU_AND_NE", ct.ComputeUnit.ALL),
+    }[compute_units]
+    precision = ct.precision.FLOAT16 if use_fp16 else ct.precision.FLOAT32
+    array_dtype = np.float16 if use_fp16 else np.float32
+
+    converted = ct.convert(
+        traced,
+        inputs=[
+            ct.TensorType(
+                name="audio_chunk",
+                shape=example_audio.shape,
+                dtype=array_dtype,
+            ),
+            ct.TensorType(
+                name="mamba_states_in",
+                shape=example_states.shape,
+                dtype=array_dtype,
+            ),
+        ],
+        outputs=[
+            ct.TensorType(name="logits", dtype=array_dtype),
+            ct.TensorType(name="mamba_states_out", dtype=array_dtype),
+        ],
+        convert_to="mlprogram",
+        compute_precision=precision,
+        compute_units=units,
         minimum_deployment_target=ct.target.iOS16,
     )
-    # Try FP16 precision if requested and supported
-    if use_fp16:
-        try:
-            # Newer coremltools supports compute_precision
-            convert_kwargs["compute_precision"] = ct.precision.FLOAT16  # type: ignore
-        except Exception:
-            pass
-    model = ct.convert(traced_model, **convert_kwargs)
-    # Optional post-conversion weight quantization
-    if use_w8 or use_fp16:
-        try:
-            import coremltools.optimize.coreml as ct_opt  # type: ignore
-            nbits = 8 if use_w8 else 16
-            op_config = ct_opt.OpLinearQuantizerConfig(mode="linear_symmetric", weight_threshold=0, nbits=nbits)
-            config = ct_opt.OptimizationConfig(global_config=op_config)
-            model = ct_opt.linear_quantize_weights(model, config=config)
-            print(f"Post-conversion {nbits}-bit weight quantization applied.")
-        except Exception as e:
-            print(f"WARNING: Post-conversion quantization failed: {e}. Model saved as FP32.")
-    
-    print("Core ML conversion placeholder complete.")
 
-    # 4. Save the model
-    model.save(output_path)
-    print(f"Core ML model saved to {output_path}")
+    if output_path.exists():
+        shutil.rmtree(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    converted.save(str(output_path))
+
+    contract = build_contract(
+        model,
+        chunk_frames,
+        reference_path,
+        contract_path,
+        "fp16" if use_fp16 else "fp32",
+    )
+    contract["packageSHA256"] = package_sha256(output_path)
+    contract_path.parent.mkdir(parents=True, exist_ok=True)
+    contract_path.write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
+
+    print(f"Core ML model saved: {output_path}")
+    print(f"Contract saved: {contract_path}")
+    print(f"Reference checkpoint: {reference_path}")
+    print(f"Package SHA-256: {contract['packageSHA256']}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Export a direct 29-logit streaming CTC Core ML package"
+    )
+    parser.add_argument("--checkpoint", "--model", dest="checkpoint", default="")
+    parser.add_argument(
+        "--output",
+        default="exports/MambaASR_ctc29.mlpackage",
+    )
+    parser.add_argument("--contract", default="")
+    parser.add_argument("--chunk", "--chunk_length", dest="chunk", type=int, default=DEFAULT_CHUNK_FRAMES)
+    parser.add_argument("--d-model", type=int, default=DEFAULT_D_MODEL)
+    parser.add_argument("--n-blocks", type=int, default=DEFAULT_N_BLOCKS)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument(
+        "--compute-units",
+        choices=["all", "cpu", "cpu-gpu", "cpu-ne"],
+        default="cpu",
+    )
+    args = parser.parse_args()
+
+    output_path = Path(args.output).resolve()
+    contract_path = (
+        Path(args.contract).resolve()
+        if args.contract
+        else output_path.parent / "contract.json"
+    )
+    checkpoint = Path(args.checkpoint).resolve() if args.checkpoint else None
+    if checkpoint is not None and not checkpoint.is_file():
+        raise SystemExit(f"checkpoint not found: {checkpoint}")
+    if args.chunk <= 0 or args.chunk % AudioConstants.TOTAL_SUBSAMPLING_FACTOR:
+        raise SystemExit("--chunk must be positive and divisible by 4")
+
+    model, _, source_checkpoint = load_ctc_model(
+        checkpoint,
+        args.d_model,
+        args.n_blocks,
+        args.seed,
+    )
+    reference_path = source_checkpoint or write_random_reference(
+        model,
+        output_path,
+        args.seed,
+    )
+    export_ctc_model(
+        model,
+        output_path,
+        contract_path,
+        reference_path,
+        args.chunk,
+        args.fp16,
+        args.compute_units,
+    )
+
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", type=str, default="", help="Path to trained/optimized MCT PyTorch model (.pth)")
-    ap.add_argument("--output", type=str, default="MambaASR.mlpackage", help="Output .mlpackage path")
-    ap.add_argument("--chunk_length", type=int, default=CoreMLConstants.DEFAULT_CHUNK_LENGTH)
-    ap.add_argument("--backend", type=str, default="mlprogram", choices=["mlprogram","neuralnetwork"], help="Core ML backend format")
-    ap.add_argument("--fp16", action="store_true", help="Attempt FP16 precision for ANE-friendlier execution")
-    ap.add_argument("--w8", action="store_true", help="Apply 8-bit weight quantization post-conversion")
-    ap.add_argument("--compute-units", type=str, default="cpu", choices=["all","cpu","cpu-gpu","cpu-ne"], help="Preferred compute units during conversion (CPU-first default)")
-    ap.add_argument("--export-no-rnn", action="store_true", help="Use export-friendly MLP predictor to avoid RNN ops on ANE")
-    args = ap.parse_args()
-
-    print("Mamba-ASR MPS Core ML Export Script")
-    if not HAS_CT:
-        print("coremltools not installed; export is a no-op. Install coremltools to proceed.")
-    else:
-        from modules.mct.mct_model import MCTModel, MCTConfig  # type: ignore
-        model: nn.Module
-        if args.model:
-            try:
-                ckpt = torch.load(args.model, map_location="cpu", weights_only=True)
-                cfg_kwargs = ckpt.get("config", {})
-                if not isinstance(cfg_kwargs, dict):
-                    cfg_kwargs = {}
-                cfg = MCTConfig(**cfg_kwargs)
-                model = MCTModel(cfg)
-                if "model_state" in ckpt:
-                    model.load_state_dict(ckpt["model_state"], strict=False)
-                else:
-                    print("Warning: checkpoint missing 'model_state'; exporting untrained init model.")
-            except Exception as e:
-                print(f"Failed to load checkpoint {args.model} ({e}); exporting fresh model.")
-                cfg = MCTConfig()
-                model = MCTModel(cfg)
-        else:
-            cfg = MCTConfig()
-            model = MCTModel(cfg)
-        model.eval()
-        export_to_coreml(
-            model,
-            output_path=args.output,
-            chunk_length=args.chunk_length,
-            backend=args.backend,
-            use_fp16=args.fp16,
-            use_w8=args.w8,
-            compute_units=args.compute_units,
-            export_no_rnn=args.export_no_rnn,
-        )
+    main()

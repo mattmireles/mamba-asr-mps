@@ -546,3 +546,28 @@ Machine: M2 Ultra, 64 GB, macOS 26.5.2. Active interpreter:
 
 Full LibriSpeech data, manifests, and archives are local under gitignored
 `data/`; they are not release artifacts and are not committed.
+
+### 2026-07-27 v1 CTC-29 Phase 1 — Contract and Random-Weight Parity
+
+Machine: M2 Ultra, 64 GB, macOS 26.5.2. The gate used the default
+ConMambaCTC shape (d_model 256, six Mamba blocks), FP32 Core ML, a 256-frame
+new-audio chunk, eight client-carried causal-convolution context frames, and
+plain tensor Mamba state.
+
+| Gate | Result |
+| --- | --- |
+| Direct CTC export | exit 0; package SHA-256 `100aed1ab73896d96e05164582e247340bfba6f2fd24b21d3ad6fafa7f3d9b30` |
+| PyTorch↔Core ML, three chunks | aggregate logit corr 1.000000000; max abs error `1.03712082e-05` |
+| State parity | every chunk corr 1.000000000; worst max abs error `1.52587891e-05` |
+| Boundary policy | full PyTorch = chunked PyTorch = chunked Core ML greedy transcript |
+| Swift feature check | Python↔Swift mel corr 1.000000000; max abs error `5.13e-04` over 64 real-audio frames |
+| Swift CTC runner | release build and contract-driven `utt_8.wav` inference exit 0 |
+| Contract mismatch | `--chunk 512` against chunk 256 exits 1 before compilation with a clear mismatch |
+| CTC mechanical gate | exit 0; synthetic loss 23.7023 → 12.8676 |
+
+The initial symmetric, chunk-local frontend failed the greedy boundary gate
+at the default model size. The finalized frontend is causal and bias-free.
+It carries eight input frames: six cover the effective receptive history and
+rounding to eight preserves the two-stage stride-2 phase. This made
+full-versus-chunked PyTorch logits agree within `6.7e-07` in the focused
+falsification check.

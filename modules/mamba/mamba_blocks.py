@@ -160,9 +160,23 @@ class MambaBlock(nn.Module):
         self.norm = nn.LayerNorm(d)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, L, D)
+        """Run one sequence with a zero-initialized SSM state."""
         B, L, D = x.shape
         h0 = init_hidden(B, D, self.cfg.state_dim, x.device, dtype=x.dtype)
+        output, _ = self.forward_with_state(x, h0)
+        return output
+
+    def forward_with_state(
+        self,
+        x: torch.Tensor,
+        h0: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run one sequence and return the final state for streaming.
+
+        The ordinary :meth:`forward` path intentionally resets state for full
+        utterance training. Export and streaming validation call this method
+        with one state tensor per encoder block.
+        """
 
         with record_function("mamba_block_projections"):
             u = self.in_proj(x)
@@ -177,7 +191,7 @@ class MambaBlock(nn.Module):
         delta = self.dt_proj(u)  # learned discretization step projection
         A = -torch.exp(self.A_log)  # always negative, ensures stable SSM dynamics
         with record_function("mamba_block_selective_scan"):
-            y = selective_scan(
+            y, last_state = selective_scan(
                 x=u,
                 delta=delta,
                 A=A,
@@ -187,6 +201,7 @@ class MambaBlock(nn.Module):
                 z=z,
                 delta_bias=self.delta_bias,
                 h0=h0,
+                return_last_state=True,
             )
         y = self.out_proj(y)
-        return x + self.norm(y)
+        return x + self.norm(y), last_state

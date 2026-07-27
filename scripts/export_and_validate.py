@@ -323,6 +323,7 @@ def main() -> None:
     exports = ExportValidationConstants.MPS_ROOT / "exports"
     compiled_dir = exports / f"Compiled_{args.name}"
     mlpackage = exports / f"{args.name}.mlpackage"
+    contract = exports / f"{args.name}.contract.json"
     mlmodelc = compiled_dir / f"{args.name}.mlmodelc"
     exports.mkdir(parents=True, exist_ok=True)
 
@@ -331,8 +332,14 @@ def main() -> None:
     env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     # Ensure PYTHONPATH so export script can import modules
     env["PYTHONPATH"] = str(ExportValidationConstants.REPO_ROOT)
-    run([sys.executable, str(ExportValidationConstants.SCRIPTS_DIR / "export_coreml.py"),
-         "--model", str(ckpt), "--output", str(mlpackage)], env=env)
+    run([
+        sys.executable,
+        str(ExportValidationConstants.SCRIPTS_DIR / "export_coreml.py"),
+        "--checkpoint", str(ckpt),
+        "--output", str(mlpackage),
+        "--contract", str(contract),
+        "--chunk", str(args.chunk),
+    ], env=env)
 
     # 2) Compile to .mlmodelc
     compiled_dir.mkdir(parents=True, exist_ok=True)
@@ -345,30 +352,13 @@ def main() -> None:
     if not ExportValidationConstants.RUNNER_BIN.exists():
         run(["swift", "build", "-c", "release", "--package-path", str(ExportValidationConstants.RUNNER_DIR)])
 
-    # 3.5) Optionally emit a simple character vocab JSON for greedy decode
-    vocab_path: Path | None = None
-    if args.vocab_out:
-        vocab_path = Path(args.vocab_out).resolve()
-    else:
-        vocab_path = (exports / "vocab_char_29.json").resolve()
-    try:
-        import json
-        vocab_map: dict[str, str] = {"0": ""}
-        vocab_map["1"] = " "
-        for i, ch in enumerate([chr(ord('a') + k) for k in range(26)], start=2):
-            vocab_map[str(i)] = ch
-        vocab_map["28"] = "'"
-        with open(vocab_path, "w") as f:
-            json.dump(vocab_map, f)
-    except Exception:
-        vocab_path = None
-
-    # 4) Run Swift runner in streaming mode
+    # 4) Run the direct CTC runner from the exporter's single-source contract
     cmd = [
         str(ExportValidationConstants.RUNNER_BIN),
         "--mlmodelc", str(mlmodelc),
         "--mlpackage", str(mlpackage),
-        "--stream", "--duration", str(args.duration),
+        "--contract", str(contract),
+        "--duration", str(args.duration),
         "--warmup", str(args.warmup)
     ]
     if args.compute:
@@ -379,8 +369,6 @@ def main() -> None:
         cmd.extend(["--wav", args.wav])
     if args.latency_csv:
         cmd.extend(["--latency-csv", args.latency_csv])
-    if vocab_path is not None:
-        cmd.extend(["--vocab", str(vocab_path)])
     run(cmd)
 
     print("All done.")

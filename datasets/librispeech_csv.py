@@ -73,11 +73,11 @@ Audio Processing Pipeline:
 2. Resampling: Target 16kHz sample rate for consistent features
 3. Mono conversion: Channel averaging for single-channel input
 4. Mel-spectrogram: 80-mel filterbank with 10ms hop length
-5. dB conversion: Log-scale features for neural network training
+5. Natural-log conversion shared with the Swift runner
 6. Transpose: (T, 80) layout for sequence modeling
 
 Tensor Formats:
-- Audio features: (T, 80) mel-spectrograms in dB scale
+- Audio features: (T, 80) natural-log mel-spectrograms
 - Feature lengths: (1,) tensor with sequence length
 - Token sequences: (U,) long tensors with character indices
 - Text strings: Original transcription for reference
@@ -154,11 +154,12 @@ class DatasetConstants:
     DEFAULT_SAMPLE_RATE = 16000         # Standard speech recognition sample rate
     DEFAULT_MAX_DURATION = 20.0         # Maximum audio duration in seconds
     N_MELS = 80                         # Mel-spectrogram frequency bins
-    N_FFT = 400                         # FFT window size (25ms at 16kHz)
+    N_FFT = 512                         # Power-of-two FFT shared with Swift/vDSP
     HOP_LENGTH = 160                    # STFT hop length (10ms at 16kHz)
     WIN_LENGTH = 400                    # Window length (25ms at 16kHz)
     F_MIN = 0                           # Minimum frequency for mel filterbank
     F_MAX = 8000                        # Maximum frequency for mel filterbank
+    LOG_FLOOR = 1e-6                    # Natural-log clamp shared with Swift
     
     # Synthetic Data Parameters (fallback mode)
     FRAMES_PER_SECOND = 100             # Mel frames per second (10ms hop)
@@ -178,11 +179,12 @@ class DatasetConstants:
             "win_length": DatasetConstants.WIN_LENGTH,
             "f_min": DatasetConstants.F_MIN,
             "f_max": DatasetConstants.F_MAX,
-            "center": True,
+            "center": False,
             "pad_mode": "reflect",
             "power": 2.0,
             "norm": None,
             "onesided": True,
+            "mel_scale": "htk",
         }
     
     @staticmethod
@@ -200,6 +202,44 @@ class DatasetConstants:
         bytes_per_sample = avg_frames * DatasetConstants.N_MELS * 4  # float32
         total_bytes = num_samples * bytes_per_sample
         return total_bytes / (1024 ** 3)  # Convert to GB
+
+
+def create_mel_transform(
+    sample_rate: int = DatasetConstants.DEFAULT_SAMPLE_RATE,
+):
+    """Build the canonical fixed-parameter mel transform.
+
+    The exporter writes these parameters to ``contract.json`` and the Swift
+    runner rejects any contract it cannot reproduce.
+    """
+    if not HAS_TORCHAUDIO:
+        raise RuntimeError("torchaudio is required for real-audio features")
+    config = DatasetConstants.get_mel_config()
+    config["sample_rate"] = sample_rate
+    return torchaudio.transforms.MelSpectrogram(**config)
+
+
+def waveform_to_log_mel(
+    waveform: torch.Tensor,
+    sample_rate: int,
+    transform=None,
+) -> torch.Tensor:
+    """Convert an audio tensor to the canonical ``(T, 80)`` log-mel input."""
+    if not HAS_TORCHAUDIO:
+        raise RuntimeError("torchaudio is required for real-audio features")
+    if sample_rate != DatasetConstants.DEFAULT_SAMPLE_RATE:
+        waveform = torchaudio.functional.resample(
+            waveform,
+            sample_rate,
+            DatasetConstants.DEFAULT_SAMPLE_RATE,
+        )
+    if waveform.ndim == 2:
+        waveform = waveform.mean(dim=0)
+    mel_transform = transform or create_mel_transform()
+    mel = mel_transform(waveform)
+    return torch.log(
+        torch.clamp(mel, min=DatasetConstants.LOG_FLOOR)
+    ).transpose(0, 1)
 
 
 @dataclass
@@ -241,7 +281,7 @@ class LibriSpeechCSVDataset(torch.utils.data.Dataset):
         /path/to/audio2.flac,5.67,"speech recognition"
     
     Returns (per sample):
-        mel_db: (T, 80) mel-spectrograms in dB scale
+        mel_features: (T, 80) natural-log mel-spectrograms
         feat_len: (1,) tensor with sequence length T
         tokens: (U,) long tensor with character token indices
         text: Original transcription string
@@ -295,11 +335,7 @@ class LibriSpeechCSVDataset(torch.utils.data.Dataset):
         - Graceful handling of CSV format variations
         """
         # Pre-build transforms once (avoid per-sample allocation)
-        self._mel_transform = torchaudio.transforms.MelSpectrogram(
-            **DatasetConstants.get_mel_config()
-        )
-        self._amp_to_db = torchaudio.transforms.AmplitudeToDB()
-
+        self._mel_transform = create_mel_transform(self.sample_rate)
         self.rows: List[Tuple[str, float, str]] = []
         p = Path(self.manifest)
         with p.open("r", encoding="utf-8") as f:
@@ -333,7 +369,7 @@ class LibriSpeechCSVDataset(torch.utils.data.Dataset):
         2. Resample to target sample rate if necessary
         3. Convert to mono by averaging channels
         4. Extract mel-spectrogram with optimized parameters
-        5. Convert to dB scale for neural network training
+        5. Apply the contract's natural-log floor
         6. Transpose to time-first layout: (T, 80)
         
         Apple Silicon Optimizations:
@@ -346,7 +382,7 @@ class LibriSpeechCSVDataset(torch.utils.data.Dataset):
             idx: Sample index in dataset
             
         Returns:
-            mel_db: (T, 80) mel-spectrograms in dB scale
+            mel_features: (T, 80) natural-log mel-spectrograms
             feat_len: (1,) tensor with sequence length T
             tokens: (U,) long tensor with character indices
             text: Original transcription string
@@ -382,22 +418,15 @@ class LibriSpeechCSVDataset(torch.utils.data.Dataset):
                 # Load audio with MPS acceleration if available
                 wav, sr = torchaudio.load(wav_path)
                 
-                # Resample to target sample rate if necessary
-                if sr != self.sample_rate:
-                    wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
-                
-                # Convert to mono by averaging channels
-                wav = torch.mean(wav, dim=0, keepdim=False)
-                
-                # Extract mel-spectrogram with pre-built transforms
-                mel_spec = self._mel_transform(wav)
-
-                # Convert to dB scale and transpose to time-first: (T, 80)
-                mel_db = self._amp_to_db(mel_spec).transpose(0, 1)
+                mel_db = waveform_to_log_mel(
+                    wav,
+                    sr,
+                    transform=self._mel_transform,
+                )
                 
             except Exception as _exc:
                 warnings.warn(
-                    f"Audio load/process failed for '{path}' ({_exc}); substituting synthetic frames.",
+                    f"Audio load/process failed for '{wav_path}' ({_exc}); substituting synthetic frames.",
                     RuntimeWarning,
                     stacklevel=2,
                 )

@@ -1,7 +1,7 @@
 # v1 Ship: CTC-29 End-to-End On-Device ASR Plan
 
 **Date:** 2026-07-27
-**Status:** In Progress — Phase 0 complete (2026-07-27)
+**Status:** In Progress — Phase 1 complete (2026-07-27)
 
 ## Executive Summary
 
@@ -32,9 +32,9 @@ artifact running on this machine, with every claim backed by a command.
 - [ ] A `vocab_size=29` ConMambaCTC trained on train-clean-100 with greedy
       dev-clean WER ≤ 0.25 (stretch: ≤ 0.15), measured by
       `scripts/compute_wer_cer.py`.
-- [ ] A PyTorch↔Core ML parity harness that runs over a chunk *sequence* and
+- [x] A PyTorch↔Core ML parity harness that runs over a chunk *sequence* and
       fails loudly — proven on random weights **before** any training run.
-- [ ] One chunk/vocab/mel contract, written by the exporter and read by the
+- [x] One chunk/vocab/mel contract, written by the exporter and read by the
       Swift runner — a mismatch becomes a loud error, not a coincidence.
 - [ ] Measured test-clean WER and per-chunk latency for the shipped
       `.mlpackage`, recorded in `README/training-notes.md` with machine and
@@ -101,13 +101,14 @@ artifact running on this machine, with every claim backed by a command.
 
 ## Fresh Baseline (Current State)
 
-- **Architecture:** ConMambaCTC (conv frontend ×2 stride-2 → 6× MambaBlock
-  d256 → linear head), 4× time reduction. Sound; unchanged in this plan.
+- **Architecture:** ConMambaCTC (causal conv frontend ×2 stride-2 → 6×
+  MambaBlock d256 → 29-logit linear head), 4× time reduction. Streaming
+  carries eight mel frames plus each block's Mamba state.
 - **Metrics:** no trained checkpoint exists anywhere on this machine; best
   historical accuracy CER ≈0.86 on synthetic audio; real WER always 1.000.
 - **Known gaps:** the audio environment and three required LibriSpeech splits
-  are now ready locally; exporter still exports the wrong model (MCT) for the
-  CTC path; chunk=256 agreement between exporter and Swift is coincidental.
+  are ready locally; direct CTC export, numerical parity, and the Swift
+  contract are proven on random weights. No trained checkpoint exists yet.
 
 ## Solution Overview
 
@@ -182,34 +183,36 @@ convention before trusting the exit code.
 
 **Tasks:**
 
-- [ ] Make 29 the default vocab everywhere: `modules/Conmamba.py`
+- [x] Make 29 the default vocab everywhere: `modules/Conmamba.py`
       (`ConMambaConfig.vocab_size` 1024→29), `train.py` (train the 29-logit
       head directly; delete the 1024→29 projection-head training path),
       `train_CTC.py` (synthetic targets already fit in 29 — keep the sanity
       gate green).
-- [ ] New CTC streaming export in `scripts/export_coreml.py`: a
-      `StreamingCTCWrapper` over ConMambaCTC — inputs `audio_chunk[1,C,80]` +
-      per-layer Mamba hidden states; outputs `logits[1,C/4,29]` + updated
-      states. Plain tensor I/O (StateType is out of scope). Exporter writes
+- [x] New CTC streaming export in `scripts/export_coreml.py`: a
+      `StreamingCTCWrapper` over ConMambaCTC — inputs
+      `audio_chunk[1,C+8,80]` (eight carried mel frames + C new frames) +
+      per-layer Mamba hidden states. Outputs are `logits[1,C/4,29]` +
+      updated states. Plain
+      tensor I/O (StateType is out of scope). Exporter writes
       `exports/contract.json`: chunk frames, time reduction, mel params,
       vocab list, state shapes.
-- [ ] Chunk-boundary policy, decided empirically, not speculatively: the
+- [x] Chunk-boundary policy, decided empirically, not speculatively: the
       parity harness (next task) measures chunked-vs-full-sequence
       divergence on real fixture audio. If greedy transcripts differ, carry
       conv left-context frames client-side; if not, accept and document the
       boundary approximation. Record the measurement in this plan's Debug
       Notes.
-- [ ] New `scripts/validate_parity.py`: runs the same fixture WAV through
+- [x] New `scripts/validate_parity.py`: runs the same fixture WAV through
       PyTorch (full sequence AND chunked-with-state) and Core ML (chunked),
       over ≥3 chunks; reports per-output correlation, max |Δ|, and greedy
       transcript equality; exits non-zero on tolerance failure (initial
       FP32 tolerance: corr ≥ 0.999, max |Δ| ≤ 1e-3 — tune only with recorded
       evidence).
-- [ ] Swift runner CTC mode in `swift/MambaASRRunner/Sources/.../main.swift`:
+- [x] Swift runner CTC mode in `swift/MambaASRRunner/Sources/.../main.swift`:
       read `contract.json` (chunk size, vocab, mel params, I/O names) instead
       of hardcoded constants; greedy CTC decode; keep the existing MCT flags
       working or explicitly retired.
-- [ ] Retire the projection tooling from the v1 path: mark
+- [x] Retire the projection tooling from the v1 path: mark
       `scripts/extract_projection_from_ckpt.py` and
       `scripts/make_projection_mod29.py` deprecated in their headers
       (deletion happens in Phase 3 cleanup).
@@ -225,6 +228,20 @@ convention before trusting the exit code.
   `--chunk` fails with a clear message (demonstrate once, record output).
 - `swift build -c release --package-path swift/MambaASRRunner` → exit 0.
 - Mechanical gate: CTC sanity → exit 0.
+
+**Recorded 2026-07-27:** default d256/6-block FP32 export exited 0
+(`packageSHA256=100aed1ab73896d96e05164582e247340bfba6f2fd24b21d3ad6fafa7f3d9b30`).
+On `utt_8.wav` tiled to three 256-frame chunks, aggregate PyTorch↔Core ML
+logit correlation was 1.000000000 with max error `1.03712082e-05`; every
+per-chunk logit/state correlation was 1.000000000, and full, chunked, and
+Core ML greedy transcripts matched. Swift release build and contract-driven
+real-WAV inference exited 0. `--chunk 512` against the 256-frame contract
+failed before model compilation with exit 1 and
+`CTC contract mismatch: --chunk 512 does not match contract chunkFrames 256`.
+The CTC sanity gate exited 0 (loss 23.7023 → 12.8676).
+The phase-local correctness, regression, integration, security, and scope
+audit found no remaining Phase 1 blocker; `COORD-AGENTS.md` remained an
+unrelated pre-existing worktree modification and was excluded.
 
 ---
 
@@ -445,10 +462,10 @@ spent on it.
 
 #### Phase 1: Contracts + Verification Layer
 
-- [ ] vocab 29 default end-to-end, sanity gate green
-- [ ] CTC export + `contract.json`
-- [ ] `validate_parity.py` passing on random weights
-- [ ] Swift runner CTC mode reading the contract
+- [x] vocab 29 default end-to-end, sanity gate green
+- [x] CTC export + `contract.json`
+- [x] `validate_parity.py` passing on random weights
+- [x] Swift runner CTC mode reading the contract
 
 #### Phase 2: Train to Convergence
 
@@ -476,6 +493,21 @@ Append real issues encountered during implementation with fixes.
   `2a93770f6d5c6c964bc36631d331a522` (train),
   `42e2234ba48799c1f50f24a7926300a1` (dev), and
   `32fa31d27d2e1cad72775fee3f4849a9` (test).
+- **2026-07-27 — Phase 1 boundary policy:** the first default-size random
+  gate falsified chunk-local symmetric convolution: PyTorch↔Core ML numerics
+  passed, but full and chunked greedy transcripts differed. Replaced future-
+  dependent symmetric padding with a causal, bias-free two-convolution
+  frontend. The client now carries eight mel frames (six-frame receptive
+  history rounded to the four-frame stride), and the model discards the two
+  context-only outputs. Full/chunked PyTorch logits then agreed to
+  `6.7e-07`; the default-size three-chunk transcript gate passed.
+- **2026-07-27 — Phase 1 Swift DSP/state:** Swift initially produced NaNs
+  because new `MLMultiArray` state storage was not guaranteed initialized;
+  the CTC path now explicitly zero-fills it. Swift also placed the 400-sample
+  Hann window at the start of each 512-point frame, while `torch.stft`
+  centers a shorter window inside the FFT frame even with `center=false`.
+  Centering the window yielded Swift↔Python mel correlation 1.000000000,
+  max error `5.13e-04`, on the first 64 frames of `utt_8.wav`.
 
 ---
 

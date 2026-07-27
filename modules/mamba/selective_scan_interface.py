@@ -35,7 +35,7 @@ References:
 """
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Tuple, Union
 
 import torch
 import os
@@ -87,7 +87,8 @@ def selective_scan(
     z: torch.Tensor,        # (B, L, D) - Gating/selection mechanism
     delta_bias: torch.Tensor,  # (D,) - Bias for discretization stability
     h0: torch.Tensor,       # (B, D, N) - Initial hidden state
-) -> torch.Tensor:
+    return_last_state: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """Core selective scan operation implementing Mamba's sequence modeling.
     
     This function implements the mathematical heart of the Mamba architecture:
@@ -138,7 +139,9 @@ def selective_scan(
         h0: Initial hidden state (typically zeros)
         
     Returns:
-        y: Output sequence (B, L, D) with selective state space processing
+        Output sequence ``(B, L, D)``. When ``return_last_state`` is true,
+        returns ``(output, last_state)`` so a streaming caller can carry the
+        exact SSM state into the next chunk.
         
     Tensor Shape Evolution:
         Input:  x(B,L,D) -> delta(B,L,D) -> A(D,N) -> B_proj(B,L,N) -> C_proj(B,L,N)
@@ -203,6 +206,8 @@ def selective_scan(
             skip_connection = x * D.view(1, 1, -1)
             gating_weights = torch.sigmoid(z)
             final_output = output_sequence * gating_weights + skip_connection
+        if return_last_state:
+            return final_output, hidden_state
         return final_output  # (B, L, D)
 
 

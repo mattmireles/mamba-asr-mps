@@ -88,7 +88,7 @@ class TrainingConstants:
     # Model Configuration
     DEFAULT_D_MODEL = 256           # Model dimension
     DEFAULT_N_BLOCKS = 2            # Number of Mamba blocks (lightweight for testing)
-    DEFAULT_VOCAB_SIZE = 1024       # Vocabulary size
+    DEFAULT_VOCAB_SIZE = 29         # blank + space + a-z + apostrophe
     
     # Loss Configuration  
     CTC_BLANK_TOKEN = 0             # CTC blank token index
@@ -135,7 +135,7 @@ class DatasetConstants:
     # Text Characteristics
     MIN_TARGET_LEN = 5              # Minimum target sequence length
     MAX_TARGET_LEN = 50             # Maximum target sequence length
-    DEFAULT_VOCAB_SIZE = 1024       # Standard vocabulary size
+    DEFAULT_VOCAB_SIZE = 29         # Character vocabulary size
     
     # Performance Targets
     TARGET_FRAMES_PER_SEC = 10000   # Performance target for Apple Silicon
@@ -206,7 +206,7 @@ class DummyDataset(torch.utils.data.Dataset):
     
     Usage:
         # Quick testing
-        dataset = DummyDataset(num=32, max_T=800, vocab=1024)
+        dataset = DummyDataset(num=32, max_T=800, vocab=29)
         
         # Stress testing
         dataset = DummyDataset(num=1000, max_T=2000, vocab=5000)

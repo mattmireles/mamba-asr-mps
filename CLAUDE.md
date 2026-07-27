@@ -74,28 +74,30 @@ reality. Every fact below was verified on this machine (M2 Ultra, 64 GB,
 torch 2.8.0, MPS available). When you fix one, update this section — it is the
 anti-rot anchor.
 
-- **No trained model exists, anywhere.** No `.pt`/`.ckpt` checkpoint survives on
-  this machine; every recovered `.mlpackage` is a weight-stripped shell.
-  `checkpoints/`, `exports/`, `data/` are absent. Docs citing them are
-  historical.
-- **No real-audio accuracy was ever achieved.** Best ever: CER ≈0.86 on
-  synthetic audio; real-audio WER was always 1.000. Root cause: the encoder
-  emits 1024 logits while decoding expects the 29-char vocab
-  (`README/implementation-plan-v2.md:337`). Audit recommendation (pending
-  plan): train `vocab_size=29` end-to-end and delete the 1024→29 projection
-  hack.
+- **No trained model exists yet.** Local `.pt` files under gitignored
+  `exports/` are deterministic random references for the parity gate, not
+  trained checkpoints. Real LibriSpeech data is ready under gitignored
+  `data/`; accuracy work begins in Plan v1 Phase 2.
+- **No real-audio accuracy was ever achieved.** Best historical result:
+  CER ≈0.86 on synthetic audio; real-audio WER was always 1.000. The
+  1024-vs-29 contract break is now removed from the CTC v1 path: training,
+  export, and Swift use 29 logits directly. Accuracy remains unverified until
+  the Phase 2 checkpoint reaches its dev-clean gate.
 - **RNN-T training is broken.** `modules/rnnt_loss_mps.py:249` returns a
   gradient-less constant when no backend is installed, and the dispatch at
   `train_RNNT.py:706` makes the advertised naive/CTC fallback unreachable; the
   naive backend independently breaks autograd via in-place mutation.
-- **The export pipeline has no parity gate.** `scripts/export_coreml.py`
-  exports a randomly initialized model by default, and the pipeline still
-  prints "ready for deployment". No PyTorch↔Core ML numerical comparison
-  exists on any path.
-- **`ct.StateType` is used nowhere** — recurrence is plain tensor I/O
-  (`predictor_hidden_in`/`predictor_hidden_out`). Export and the Swift runner
-  agree on chunk=256 only by coincidence of two hardcoded defaults; the
-  documented `--chunk 512` flow crashes at predict time.
+- **Direct CTC export has a parity gate (2026-07-27).**
+  `scripts/export_coreml.py` writes a package plus `contract.json` and an
+  exact random reference when no checkpoint is supplied.
+  `scripts/validate_parity.py` compares full/chunked PyTorch with chunked
+  Core ML over at least three chunks and fails on numerical or greedy-text
+  divergence. Random weights prove mechanics only, never accuracy.
+- **`ct.StateType` is used nowhere** — v1 recurrence is deliberately plain
+  tensor I/O (`mamba_states_in`/`mamba_states_out`). The exporter owns chunk,
+  vocab, mel, eight-frame causal-convolution context, state shape, and I/O
+  names in `contract.json`; Swift reads and validates it. A mismatched
+  `--chunk` fails before model compilation.
 - **ANE placement was never demonstrated.** The fastest measured config is
   CPU-only (~3 ms/chunk). "Targets the ANE" is aspiration, not result.
 - **Environment + data ready (2026-07-27):** the active `python3` has
@@ -103,9 +105,9 @@ anti-rot anchor.
   OpenSLR train-clean-100/dev-clean/test-clean archives matched their published
   MD5s and produced local manifests with 28,539 / 2,703 / 2,620 valid rows.
   The corpus and manifests live under gitignored `data/`.
-- **Green today:** CTC sanity (exit 0), `benchmarks/bench_selective_scan.py`,
-  `swift build` of MambaASRRunner, and the (unvalidated) random-weight
-  export→compile→Swift streaming loop.
+- **Green today:** CTC sanity, `benchmarks/bench_selective_scan.py`, Swift
+  release build, default d256/6-block random CTC export, three-chunk
+  PyTorch↔Core ML parity, and contract-driven Swift real-WAV inference.
 
 ## Verification: there is no test suite
 

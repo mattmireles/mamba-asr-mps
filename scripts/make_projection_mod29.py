@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""DEPRECATED: legacy 1024-to-29 modulo map; direct CTC deletes this in Phase 3."""
+
 import sys
 from pathlib import Path
 

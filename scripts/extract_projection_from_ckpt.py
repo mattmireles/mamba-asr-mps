@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """
+DEPRECATED: v1 trains and exports a direct 29-logit CTC head. This legacy
+1024-to-29 projection utility is retained only until the Phase 3 cleanup.
+
 Extract learned projection matrix from MambaASR checkpoint for CoreML deployment integration.
 
 This script extracts the trained 1024→29 character projection weights from PyTorch checkpoints

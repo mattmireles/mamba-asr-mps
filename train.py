@@ -1,91 +1,16 @@
 #!/usr/bin/env python3
-"""
-End-to-end training script for Mamba-ASR with a learned 1024→29 projection head.
+"""Train the 29-logit ConMamba CTC model on real speech.
 
-This script trains a production-ready projection head on top of a 1024-class
-ConMamba CTC backbone and automates validation, checkpointing, and post-run
-export/evaluation. It serves as the bridge between the PyTorch training pipeline
-and the CoreML deployment system used by Swift applications.
-
-Key responsibilities:
-- Training learned projection head for character-level CTC loss
-- Comprehensive validation with Character Error Rate (CER) metrics
-- Automatic checkpointing and best model selection
-- Integration with CoreML export pipeline for production deployment
-- Apple Silicon MPS optimization with CPU fallback for unsupported operations
-
-Called by:
-- Direct command-line execution for standalone Mamba-ASR training
-- Batch training scripts for hyperparameter sweeps and experiments
-- CI/CD pipelines for automated model training and validation
-- Development workflows for iterative model improvement
-- Research experiments comparing Mamba vs Transformer architectures
-
-Calls to:
-- datasets/librispeech_csv.py:LibriSpeechCSVDataset for efficient CSV-based data loading
-- modules/Conmamba.py:ConMambaCTC for the core Mamba encoder backbone
-- utils/tokenizer.py:CharTokenizer for character-level tokenization and normalization
-- utils/hardware.py:get_optimal_worker_count() for Apple Silicon worker optimization
-- scripts/extract_projection_from_ckpt.py for learned projection weight extraction
-- scripts/eval_batch.sh for comprehensive CoreML evaluation harness
-- External: torch.nn.CTCLoss, torch.optim.AdamW, torch.optim.lr_scheduler.CosineAnnealingLR
-
-System architecture integration:
-- Backbone: ConMambaCTC with configurable vocab_size=1024 to produce per-frame logits
-- Projection Head: Final torch.nn.Linear(1024, 29) named `proj` for character vocab
-- Loss Function: CTC loss over 29-character vocabulary (blank token at index 0)
-- Validation: CTC loss + Character Error Rate via greedy CTC decoding
-- Checkpointing: Regular snapshots with best model selection based on lowest validation CER
-- Post-training: Automatic projection extraction and CoreML evaluation harness execution
-
-Design rationale:
-- The CoreML runtime and Swift runner already operate with a 1024-wide vocabulary internally
-- Learning a 1024→29 projection on real speech data provides accurate, data-driven character mappings
-- The learned projection weights are exported to exports/projection_1024x29.csv for CoreML integration
-- This approach enables efficient character-level recognition while maintaining CoreML compatibility
-
-Apple Silicon optimizations:
-- MPS acceleration leverages unified memory architecture for efficient training
-- CPU fallback enabled for CTC loss computation (PYTORCH_ENABLE_MPS_FALLBACK=1)
-- Unified memory pressure management prevents system-wide swapping
-- Memory synchronization patterns optimized for Apple Silicon architecture
-- Worker count auto-detection considers Apple Silicon multi-core performance characteristics
-
-Training pipeline integration:
-- Input: CSV manifests with audio paths, durations, and transcriptions
-- Processing: Mel-spectrogram feature extraction and character tokenization
-- Training: CTC loss optimization with AdamW and cosine annealing schedule
-- Validation: Real-time CER computation and best model checkpoint selection
-- Output: Production-ready model checkpoints and CoreML-compatible projection weights
-
-Usage examples:
-    # Minimal sanity check on a tiny CSV for development
-    python train.py \
-        --train-csv /path/to/train.csv \
-        --val-csv /path/to/val.csv \
-        --epochs 2 --batch-size 2
-
-    # Full production training with optimal hyperparameters
-    python train.py \
-        --train-csv data/train.csv --val-csv data/val.csv \
-        --epochs 30 --batch-size 8 --lr 3e-4 --d-model 256 --n-blocks 6
-
-    # Freeze backbone training (projection head only) for faster fine-tuning
-    python train.py --freeze-backbone --epochs 10
-
-Output artifacts:
-- Training checkpoints: exports/checkpoints/
-- Best model checkpoint: best.pt (selected by lowest validation CER)
-- Learned projection weights: exports/projection_1024x29.csv
-- Evaluation reports: exports/CoreMLTraces/wer_cer_overview_opt.md
-- Training logs: Comprehensive progress tracking and performance metrics
+The character head is part of :class:`modules.Conmamba.ConMambaCTC`; there is
+no intermediate 1024-class vocabulary or post-hoc projection. Checkpoints under
+``checkpoints/`` contain the exact model consumed by
+``scripts/export_coreml.py``.
 """
 from __future__ import annotations
 
 import os
 import math
 import time
-import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import List, Tuple
@@ -139,13 +64,9 @@ class MambaTrainingConstants:
     
     # MARK: - Model Architecture Constants
     
-    # Vocabulary size constants defining the model's token output spaces
-    # These sizes are critical for CoreML compatibility and deployment integration
-    BACKBONE_VOCAB_SIZE = 1024          # ConMamba CTC backbone output vocabulary size
-    CHARACTER_VOCAB_SIZE = 29           # Final character vocabulary size (a-z, space, apostrophe, blank)
+    # Vocabulary size matches CharTokenizer exactly.
+    CHARACTER_VOCAB_SIZE = 29           # blank + space + a-z + apostrophe
     CTC_BLANK_TOKEN_ID = 0              # CTC blank token identifier (standard CTC convention)
-    PROJECTION_INPUT_DIM = 1024         # Input dimension for learned projection head
-    PROJECTION_OUTPUT_DIM = 29          # Output dimension for learned projection head
     
     # Model dimension constants for ConMamba architecture
     # These defaults provide good balance between accuracy and computational efficiency
@@ -197,12 +118,7 @@ class MambaTrainingConstants:
     # Checkpoint file naming conventions for model persistence
     LAST_CHECKPOINT_NAME = "last.pt"    # Filename for most recent checkpoint
     BEST_CHECKPOINT_NAME = "best.pt"    # Filename for best validation performance checkpoint
-    DEFAULT_CHECKPOINT_DIR = "exports/checkpoints"  # Default checkpoint directory
-    
-    # Model export constants for CoreML integration
-    PROJECTION_WEIGHT_KEY = "proj.weight"   # State dict key for projection layer weights
-    PROJECTION_BIAS_KEY = "proj.bias"       # State dict key for projection layer bias
-    PROJECTION_CSV_FILENAME = "projection_1024x29.csv"  # Exported projection filename
+    DEFAULT_CHECKPOINT_DIR = "checkpoints"  # Gitignored local checkpoints
     
     # MARK: - Data Processing Constants
     
@@ -218,23 +134,6 @@ class MambaTrainingConstants:
     BLANK_CHAR_TOKEN_ID = 0             # Character tokenizer blank token identifier
     SPACE_TOKEN_ID = 1                  # Character tokenizer space token identifier (typical mapping)
     
-    # MARK: - Post-training Integration Constants
-    
-    # External script integration constants for automated workflows
-    PYTHON3_EXECUTABLE = "python3"      # Python interpreter for script execution
-    BASH_EXECUTABLE = "bash"            # Shell interpreter for batch script execution
-    SUCCESSFUL_EXIT_CODE = 0            # Unix success exit code
-    
-    # File system constants for post-training artifact management
-    PROJECTION_EXPORT_SUBDIR = "exports"           # Subdirectory for projection exports
-    COREML_TRACES_SUBDIR = "exports/CoreMLTraces"  # Subdirectory for evaluation traces
-    EVAL_SCRIPT_SUBDIR = "scripts"                 # Subdirectory for evaluation scripts
-    
-    # External script filenames for automated post-training workflows
-    PROJECTION_EXTRACTOR_SCRIPT = "extract_projection_from_ckpt.py"  # Projection extraction script
-    BATCH_EVAL_SCRIPT = "eval_batch.sh"                             # CoreML evaluation harness script
-
-
 # -----------------------------
 # Utility: device selection (MPS → CUDA → CPU)
 # -----------------------------
@@ -364,108 +263,6 @@ def ctc_collate(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str]
 
 
 # -----------------------------
-# Model wrapper with learned 1024→29 head
-# -----------------------------
-class MambaASRForCTC(nn.Module):
-    """
-    ConMamba backbone with learned projection head for character-level CTC training.
-    
-    This model combines a ConMambaCTC encoder backbone with a learned linear projection
-    head to bridge between the backbone's large vocabulary space and the final character
-    vocabulary required for speech recognition. The design enables CoreML compatibility
-    while maintaining training flexibility.
-    
-    Architecture components:
-    - Backbone: ConMambaCTC encoder configured for large intermediate vocabulary
-    - Projection Head: Linear layer mapping from backbone output to character vocabulary
-    - Integration: End-to-end training with CTC loss for character sequence prediction
-    
-    Used by:
-    - main() training loop for model instantiation and forward pass computation
-    - run_validation() function for validation loss and CER metric computation
-    - Checkpoint saving and loading operations for model persistence
-    - Post-training projection weight extraction for CoreML deployment
-    
-    Calls to:
-    - modules.Conmamba:ConMambaCTC for core Mamba encoder backbone processing
-    - modules.Conmamba:ConMambaCTCConfig for backbone configuration setup
-    - torch.nn.Linear for learned projection head implementation
-    
-    Design rationale:
-    - Large backbone vocabulary (1024) provides rich intermediate representations
-    - Learned projection enables data-driven character vocabulary mapping
-    - Named projection layer ('proj') enables easy weight extraction for CoreML
-    - Bias term in projection provides learned character frequency adaptation
-    
-    CoreML integration considerations:
-    - Projection weights exported as CSV for Swift application integration
-    - Backbone vocabulary size matches CoreML model expectations (1024 classes)
-    - Character vocabulary size matches tokenizer configuration (29 classes)
-    - Layer naming convention enables automated weight extraction scripts
-    
-    Training workflow:
-    1. Forward pass: mel_features → backbone → projection → character_logits
-    2. Loss computation: CTC loss over character vocabulary predictions
-    3. Validation: Greedy CTC decoding for Character Error Rate calculation
-    4. Checkpointing: Complete model state preservation for resumption/deployment
-    """
-
-    def __init__(self, d_model: int = MambaTrainingConstants.DEFAULT_D_MODEL, 
-                 n_blocks: int = MambaTrainingConstants.DEFAULT_N_BLOCKS):
-        """
-        Initialize MambaASR model with ConMamba backbone and projection head.
-        
-        Args:
-            d_model: Hidden dimension for Mamba blocks (default optimized for Apple Silicon)
-            n_blocks: Number of Mamba encoder blocks (default balanced for accuracy/speed)
-        """
-        super().__init__()
-        
-        # Configure ConMamba backbone with large intermediate vocabulary
-        # Uses BACKBONE_VOCAB_SIZE for rich intermediate representations
-        backbone_config = ConMambaCTCConfig(
-            d_model=d_model, 
-            n_blocks=n_blocks, 
-            vocab_size=MambaTrainingConstants.BACKBONE_VOCAB_SIZE
-        )
-        self.backbone = ConMambaCTC(backbone_config)
-        
-        # Learned projection head from backbone vocabulary to character vocabulary
-        # Named 'proj' for easy extraction by scripts/extract_projection_from_ckpt.py
-        self.proj = nn.Linear(
-            MambaTrainingConstants.PROJECTION_INPUT_DIM,
-            MambaTrainingConstants.PROJECTION_OUTPUT_DIM,
-            bias=True
-        )
-
-    def forward(self, feats: torch.Tensor, feat_lens: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass from mel-spectrogram features to character-level logits.
-        
-        Processing pipeline:
-        1. Backbone processing: mel_features → ConMamba → backbone_logits[1024]
-        2. Projection mapping: backbone_logits → learned_projection → character_logits[29]
-        3. Length preservation: Maintain sequence length information for CTC loss
-        
-        Args:
-            feats: Mel-spectrogram features [batch_size, time_steps, n_mels]
-            feat_lens: Actual feature lengths [batch_size] for sequence masking
-            
-        Returns:
-            Tuple containing:
-            - character_logits: Logits over character vocabulary [batch_size, time_steps', 29]
-            - output_lengths: Sequence lengths after backbone subsampling [batch_size]
-        """
-        # Process through ConMamba backbone to get intermediate representations
-        backbone_logits, output_lengths = self.backbone(feats, feat_lens)  # [B, T', 1024]
-        
-        # Apply learned projection to map to character vocabulary space
-        character_logits = self.proj(backbone_logits)  # [B, T', 29]
-        
-        return character_logits, output_lengths
-
-
-# -----------------------------
 # Decoding and metrics (CER)
 # -----------------------------
 @dataclass
@@ -521,7 +318,7 @@ def ctc_greedy_decode(logits_29: torch.Tensor, blank_id: int = MambaTrainingCons
     
     Args:
         logits_29: Character logits tensor [batch_size, time_steps, 29]
-                   Output from MambaASRForCTC model projection head
+                   Output directly by ConMambaCTC
         blank_id: CTC blank token identifier (uses named constant for consistency)
         
     Returns:
@@ -652,8 +449,7 @@ class TrainConfig:
     num_workers: int = MambaTrainingConstants.DEFAULT_NUM_WORKERS             # DataLoader workers (0 optimal for Apple Silicon)
     checkpoint_dir: str = MambaTrainingConstants.DEFAULT_CHECKPOINT_DIR       # Directory for model checkpoint storage
     
-    # Training mode and reproducibility configuration
-    freeze_backbone: bool = False       # Whether to freeze ConMamba backbone (projection-only training)
+    # Reproducibility configuration
     seed: int = 42                      # Random seed for deterministic training reproducibility
 
 
@@ -861,7 +657,10 @@ def save_checkpoint(path: Path, model: nn.Module, optimizer: optim.Optimizer, cf
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Train Mamba-ASR with learned 1024→29 projection head (CTC)", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description="Train the direct 29-logit ConMamba CTC model",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument("--train-csv", required=True, help="Path to training CSV manifest (path,duration,text)")
     parser.add_argument("--val-csv", required=True, help="Path to validation CSV manifest (path,duration,text)")
     parser.add_argument("--epochs", type=int, default=MambaTrainingConstants.DEFAULT_EPOCHS)
@@ -875,9 +674,7 @@ def main() -> None:
     parser.add_argument("--eval-every-epochs", type=int, default=MambaTrainingConstants.DEFAULT_EVAL_EVERY_EPOCHS)
     parser.add_argument("--log-interval", type=int, default=MambaTrainingConstants.DEFAULT_LOG_INTERVAL)
     parser.add_argument("--grad-clip", type=float, default=MambaTrainingConstants.DEFAULT_GRADIENT_CLIP)
-    parser.add_argument("--freeze-backbone", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--no-post-eval", action="store_true", help="Skip projection extraction + batch eval harness at the end")
 
     args = parser.parse_args()
 
@@ -895,7 +692,6 @@ def main() -> None:
         eval_every_epochs=args.eval_every_epochs,
         log_interval=args.log_interval,
         grad_clip=args.grad_clip,
-        freeze_backbone=args.freeze_backbone,
         seed=args.seed,
     )
 
@@ -926,11 +722,13 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=worker_count, collate_fn=ctc_collate, pin_memory=MambaTrainingConstants.DEFAULT_PIN_MEMORY)
 
     # Model
-    model = MambaASRForCTC(d_model=cfg.d_model, n_blocks=cfg.n_blocks)
-    if cfg.freeze_backbone:
-        for p in model.backbone.parameters():
-            p.requires_grad = False
-        print("Backbone frozen; training projection head only")
+    model = ConMambaCTC(
+        ConMambaCTCConfig(
+            d_model=cfg.d_model,
+            n_blocks=cfg.n_blocks,
+            vocab_size=MambaTrainingConstants.CHARACTER_VOCAB_SIZE,
+        )
+    )
     model = model.to(device)
 
     # Loss and optimizer using named constants
@@ -1024,50 +822,6 @@ def main() -> None:
                 print(f"New best CER {best_val_cer:.4f} at epoch {epoch}; saved {best_ckpt}")
 
     print("Training complete.")
-
-    if not args.no_post_eval:
-        # -----------------------------
-        # Post-run integration
-        # 1) Extract learned projection to CSV
-        # 2) Run batch evaluation harness (Core ML + Swift runner)
-        # -----------------------------
-        try:
-            repo_root = Path(__file__).resolve().parent
-            proj_out = repo_root / "exports/projection_1024x29.csv"
-            ckpt_path = best_ckpt if best_ckpt.exists() else last_ckpt
-            if not ckpt_path.exists():
-                print("No checkpoint found for projection extraction; skipping post-run steps.")
-            else:
-                # Call extractor script with our parameter keys
-                extractor = repo_root / "scripts/extract_projection_from_ckpt.py"
-                cmd = [
-                    "python3", str(extractor),
-                    "--ckpt", str(ckpt_path),
-                    "--w-key", "proj.weight",
-                    "--b-key", "proj.bias",
-                    "--out", str(proj_out),
-                ]
-                print("Extracting learned projection →", proj_out)
-                import subprocess
-                result = subprocess.run(cmd)
-                if result.returncode != 0:
-                    print("Projection extraction failed (non-zero exit).")
-                else:
-                    print("Projection CSV written:", proj_out)
-
-                # Run batch eval harness (uses learned projection automatically)
-                eval_script = repo_root / "scripts/eval_batch.sh"
-                if eval_script.exists():
-                    print("Running batch evaluation harness...")
-                    result2 = subprocess.run(["bash", str(eval_script)])
-                    if result2.returncode != 0:
-                        print("Batch evaluation failed (non-zero exit). See logs above.")
-                    else:
-                        print("Batch evaluation complete. See exports/CoreMLTraces for reports.")
-                else:
-                    print("Batch eval script not found; skipping.")
-        except Exception as e:
-            print(f"Post-run steps encountered an error: {e}")
 
 
 if __name__ == "__main__":

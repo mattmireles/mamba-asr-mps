@@ -34,7 +34,7 @@ Performance Characteristics:
 - Memory: O(B * T/4 * D + B * D * N * num_blocks)
 
 Training Configuration:
-- Typical setup: d_model=256, n_blocks=4-8, vocab_size=1024
+- Typical setup: d_model=256, n_blocks=4-8, vocab_size=29
 - CTC blank token at index 0
 - Input: 80-dimensional mel-spectrograms
 - Output: Character or subword vocabulary logits
@@ -71,8 +71,9 @@ class AudioConstants:
     # Frontend Convolution Parameters
     FRONTEND_KERNEL_SIZE = 3    # Conv1d kernel size for time-domain processing
     FRONTEND_STRIDE = 2         # Stride for 2x subsampling per layer
-    FRONTEND_PADDING = 1        # Padding to maintain reasonable sequence length
+    FRONTEND_PADDING = 0        # Causal padding is applied explicitly on the left
     TOTAL_SUBSAMPLING_FACTOR = 4  # Total reduction: 2 layers * stride 2 = 4x
+    CONV_CONTEXT_FRAMES = 8     # Client-carried input context; stride-aligned
     
     # Mamba Architecture
     MAMBA_STATE_DIM = 16        # State space dimension for Mamba blocks
@@ -116,9 +117,9 @@ class ConMambaCTCConfig:
     - Memory bandwidth bound by selective_scan operations
     
     Typical Configurations:
-    - Small: d_model=128, n_blocks=2, vocab_size=512 (prototyping)
-    - Medium: d_model=256, n_blocks=4, vocab_size=1024 (baseline)
-    - Large: d_model=512, n_blocks=8, vocab_size=2048 (production)
+    - Small: d_model=128, n_blocks=2, vocab_size=29 (prototyping)
+    - Medium: d_model=256, n_blocks=4, vocab_size=29 (baseline)
+    - Large: d_model=512, n_blocks=8, vocab_size=29 (production)
     
     Called By:
     - train_CTC.py for training configuration
@@ -127,7 +128,7 @@ class ConMambaCTCConfig:
     """
     d_model: int = 256      # Model dimension for all linear operations
     n_blocks: int = 4       # Number of Mamba encoder blocks
-    vocab_size: int = 1024  # Output vocabulary size (including CTC blank)
+    vocab_size: int = 29    # Character vocabulary including CTC blank
 
 
 class ConMambaCTC(nn.Module):
@@ -185,7 +186,8 @@ class ConMambaCTC(nn.Module):
                 out_channels=d_model, 
                 kernel_size=AudioConstants.FRONTEND_KERNEL_SIZE,  # 3
                 stride=AudioConstants.FRONTEND_STRIDE,  # 2
-                padding=AudioConstants.FRONTEND_PADDING  # 1
+                padding=AudioConstants.FRONTEND_PADDING,
+                bias=False,
             ),
             nn.GELU(),  # Smooth activation, well-optimized on Apple Silicon
             
@@ -195,7 +197,8 @@ class ConMambaCTC(nn.Module):
                 out_channels=d_model,
                 kernel_size=AudioConstants.FRONTEND_KERNEL_SIZE,  # 3
                 stride=AudioConstants.FRONTEND_STRIDE,  # 2 
-                padding=AudioConstants.FRONTEND_PADDING  # 1
+                padding=AudioConstants.FRONTEND_PADDING,
+                bias=False,
             ),
             nn.GELU(),
         )
@@ -249,16 +252,8 @@ class ConMambaCTC(nn.Module):
         batch_size, time_frames, mel_features = feats.shape
         assert mel_features == AudioConstants.MEL_FEATURES, f"Expected {AudioConstants.MEL_FEATURES} mel features, got {mel_features}"
         
-        feats_transposed = feats.transpose(1, 2)  # (B, 80, T) for Conv1d
-        
-        # Step 2: Frontend processing with time subsampling
-        # Two Conv1d layers with stride=2 each provide 4x total subsampling
-        # This reduces sequence length from T to T/4, crucial for efficiency
-        frontend_output = self.frontend(feats_transposed)  # (B, D, T/4)
-        
-        # Step 3: Prepare for sequence modeling
-        # Transpose back to (batch, time, features) for Mamba blocks
-        features = frontend_output.transpose(1, 2)  # (B, T/4, D)
+        # Step 2: Causal frontend processing with time subsampling.
+        features = self._causal_frontend(feats)
         
         # Step 4: Mamba sequence encoding
         # Pass through stack of Mamba blocks for temporal modeling
@@ -278,10 +273,57 @@ class ConMambaCTC(nn.Module):
         # Compute exact output length using Conv1d formula per stage
         k = AudioConstants.FRONTEND_KERNEL_SIZE  # 3
         s = AudioConstants.FRONTEND_STRIDE  # 2
-        p = AudioConstants.FRONTEND_PADDING  # 1
         lengths = feat_lens
         for _ in range(2):  # two conv stages
-            lengths = (lengths + 2 * p - k) // s + 1
+            # Explicit two-frame left padding has the same output length as
+            # symmetric padding=1, while avoiding future-frame dependence.
+            lengths = (lengths + 2 - k) // s + 1
         output_lengths = torch.clamp(lengths, min=1)
         
         return logits, output_lengths
+
+    def _causal_frontend(self, feats: torch.Tensor) -> torch.Tensor:
+        """Apply the two stride-2 convolutions without future-frame access."""
+        encoded = feats.transpose(1, 2)
+        encoded = F.pad(encoded, (2, 0))
+        encoded = self.frontend[1](self.frontend[0](encoded))
+        encoded = F.pad(encoded, (2, 0))
+        encoded = self.frontend[3](self.frontend[2](encoded))
+        return encoded.transpose(1, 2)
+
+    def streaming_forward(
+        self,
+        feats: torch.Tensor,
+        states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run one fixed mel chunk while carrying per-block Mamba states.
+
+        Args:
+            feats: Eight carried context frames plus one fixed new chunk,
+                shaped ``(B, 8 + C, 80)``.
+            states: Packed block states shaped
+                ``(n_blocks, B, d_model, state_dim)``.
+
+        Returns:
+            Character logits shaped ``(B, C/4, vocab_size)`` and packed final
+            states with the same shape as ``states``.
+
+        The eight-frame left context preserves the global stride phase and
+        covers the causal frontend's seven-frame receptive field. The first
+        two frontend outputs belong to context and are discarded.
+        """
+        features = self._causal_frontend(feats)
+        context_outputs = (
+            AudioConstants.CONV_CONTEXT_FRAMES
+            // AudioConstants.TOTAL_SUBSAMPLING_FACTOR
+        )
+        features = features[:, context_outputs:, :]
+        updated_states = []
+        encoded = features
+        for block_index, mamba_block in enumerate(self.enc_blocks):
+            encoded, last_state = mamba_block.forward_with_state(
+                encoded,
+                states[block_index],
+            )
+            updated_states.append(last_state)
+        return self.ctc_head(encoded), torch.stack(updated_states, dim=0)
