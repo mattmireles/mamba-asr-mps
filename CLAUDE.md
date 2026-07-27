@@ -98,9 +98,11 @@ anti-rot anchor.
   documented `--chunk 512` flow crashes at predict time.
 - **ANE placement was never demonstrated.** The fastest measured config is
   CPU-only (~3 ms/chunk). "Targets the ANE" is aspiration, not result.
-- **Environment gap:** the active `python3` lacks `torchaudio`, `librosa`, and
-  `soundfile` — real-audio training and eval cannot run until they are
-  installed.
+- **Environment + data ready (2026-07-27):** the active `python3` has
+  `torchaudio 2.8.0`, `librosa 0.11.0`, and `soundfile 0.13.1`.
+  OpenSLR train-clean-100/dev-clean/test-clean archives matched their published
+  MD5s and produced local manifests with 28,539 / 2,703 / 2,620 valid rows.
+  The corpus and manifests live under gitignored `data/`.
 - **Green today:** CTC sanity (exit 0), `benchmarks/bench_selective_scan.py`,
   `swift build` of MambaASRRunner, and the (unvalidated) random-weight
   export→compile→Swift streaming loop.

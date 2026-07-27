@@ -33,12 +33,12 @@ Apple Silicon Optimizations:
 - SSD optimization for typical Apple Silicon storage
 
 Usage Examples:
-    # Prepare train-clean-100 subset
-    python librispeech_prepare.py --subset train-clean-100 --output train.csv
-    
-    # Prepare all subsets
-    python librispeech_prepare.py --all --output_dir manifests/
-    
+    # Prepare the three v1 splits and write manifests under data/
+    python librispeech_prepare.py --data-dir data/LibriSpeech
+
+    # Prepare one split with the legacy interface
+    python librispeech_prepare.py --root data/LibriSpeech --split dev-clean
+
     # Scan existing directory
     from librispeech_prepare import scan_directory_for_wavs_text
     rows = scan_directory_for_wavs_text(Path('/path/to/librispeech'))
@@ -66,7 +66,7 @@ import csv
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Dict
+from typing import Dict, List, Optional
 
 import torchaudio
 
@@ -169,17 +169,28 @@ def write_manifest(rows: List[LSRow], out_csv: Path) -> None:
             w.writerow([r.path, f"{r.duration:.3f}", r.text])
 
 
-def prepare_librispeech(root: str, split: str = "train-clean-100") -> Path:
+def prepare_librispeech(
+    root: str,
+    split: str = "train-clean-100",
+    output_dir: Optional[str] = None,
+) -> Path:
     """
     Build a CSV manifest for a LibriSpeech-like directory.
     Expects data under: {root}/{split}
+
+    Args:
+        root: Directory containing the extracted LibriSpeech split directories.
+        split: Split directory name, for example ``train-clean-100``.
+        output_dir: Optional directory for the generated CSV. When omitted,
+            preserve the legacy behavior and write beside the split directory.
     """
     data_dir = Path(root) / split
     if not data_dir.exists():
         raise FileNotFoundError(f"Missing data directory: {data_dir}")
     rows = scan_directory_for_wavs_text(data_dir)
-    out_csv = Path(root) / f"{split}.csv"
+    out_csv = Path(output_dir) / f"{split}.csv" if output_dir else Path(root) / f"{split}.csv"
     write_manifest(rows, out_csv)
+    print(f"{split}: {len(rows)} utterances")
     return out_csv
 
 
@@ -187,9 +198,34 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", type=str, required=True)
+    source = ap.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--root",
+        type=str,
+        help="Legacy single-split mode: directory containing --split.",
+    )
+    source.add_argument(
+        "--data-dir",
+        type=str,
+        help=(
+            "Directory containing train-clean-100, dev-clean, and test-clean. "
+            "Generates all three manifests in its parent directory."
+        ),
+    )
     ap.add_argument("--split", type=str, default="train-clean-100")
     args = ap.parse_args()
 
-    path = prepare_librispeech(args.root, args.split)
-    print(f"Wrote manifest: {path}")
+    if args.root:
+        paths = [prepare_librispeech(args.root, args.split)]
+    else:
+        data_dir = Path(args.data_dir)
+        paths = [
+            prepare_librispeech(
+                str(data_dir),
+                split,
+                output_dir=str(data_dir.parent),
+            )
+            for split in ("train-clean-100", "dev-clean", "test-clean")
+        ]
+    for path in paths:
+        print(f"Wrote manifest: {path}")

@@ -12,6 +12,7 @@ venv/
 env/
 
 # Local outputs
+data/
 exports/
 checkpoints/
 *.pt

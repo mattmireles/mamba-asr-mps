@@ -1,0 +1,1 @@
+character error rate matters more than word error rate now

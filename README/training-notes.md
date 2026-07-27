@@ -528,3 +528,21 @@ python Mamba-ASR-MPS/scripts/optimize.py --technique prune \
   --save_model Mamba-ASR-MPS/checkpoints/pruned_model.pt
 ```
 \n- Ran latency sweep (modes=all,cpu,cpu-gpu, chunks=256). See exports/CoreMLTraces/latency_sweep.md
+
+### 2026-07-27 v1 CTC-29 Phase 0 — Environment and Data
+
+Machine: M2 Ultra, 64 GB, macOS 26.5.2. Active interpreter:
+`/Applications/Xcode.app/Contents/Developer/usr/bin/python3` (Python 3.9.6).
+
+| Gate | Result |
+| --- | --- |
+| `python3 -c "import torchaudio, librosa, soundfile"` | exit 0; versions 2.8.0 / 0.11.0 / 0.13.1 |
+| `python3 -m pip check` | exit 0; no broken requirements |
+| OpenSLR archive integrity | all published MD5s matched before extraction |
+| `python3 librispeech_prepare.py --data-dir data/LibriSpeech` | exit 0; 28,539 train / 2,703 dev / 2,620 test rows |
+| Manifest integrity | zero missing paths, empty transcripts, or non-positive durations |
+| Fixture integrity | 12 WAVs and 12 same-stem references; no missing pairs |
+| `PYTHONPATH="$PWD" PYTORCH_ENABLE_MPS_FALLBACK=1 python3 train_CTC.py --epochs 1 --sanity` | exit 0; loss 36.2281 → 27.6546; 1.19 s |
+
+Full LibriSpeech data, manifests, and archives are local under gitignored
+`data/`; they are not release artifacts and are not committed.

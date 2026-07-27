@@ -1,7 +1,7 @@
 # v1 Ship: CTC-29 End-to-End On-Device ASR Plan
 
 **Date:** 2026-07-27
-**Status:** Planned
+**Status:** In Progress — Phase 0 complete (2026-07-27)
 
 ## Executive Summary
 
@@ -105,8 +105,8 @@ artifact running on this machine, with every claim backed by a command.
   d256 → linear head), 4× time reduction. Sound; unchanged in this plan.
 - **Metrics:** no trained checkpoint exists anywhere on this machine; best
   historical accuracy CER ≈0.86 on synthetic audio; real WER always 1.000.
-- **Known gaps:** active `python3` lacks `torchaudio`/`librosa`/`soundfile`;
-  no LibriSpeech copy on disk; exporter exports the wrong model (MCT) for the
+- **Known gaps:** the audio environment and three required LibriSpeech splits
+  are now ready locally; exporter still exports the wrong model (MCT) for the
   CTC path; chunk=256 agreement between exporter and Swift is coincidental.
 
 ## Solution Overview
@@ -130,19 +130,24 @@ P0 env+data  -->  P1 contracts + parity (random weights)  -->  P2 train  -->  P3
 **Goal:** The real-audio path can run; LibriSpeech manifests exist; fixtures
 are in-repo.
 
+**Skills:** None of the domain skills apply — this is environment and data
+plumbing. `phase-audit` still runs before commit (see `execute-plan`'s
+per-phase loop).
+
 **Tasks:**
 
-- [ ] Install audio stack into the active env, matching torch 2.8.0:
+- [x] Install audio stack into the active env, matching torch 2.8.0:
       `python3 -m pip install "torchaudio==2.8.*" librosa soundfile`.
-- [ ] (Optional, user-only) Check the locked legacy home
+- [x] (Optional, user-only) Check the locked legacy home
       `/Users/mattmireles/Documents/Training Data/LibriSpeech/` for an
-      existing corpus copy before downloading.
-- [ ] Download from OpenSLR (SLR12): `train-clean-100.tar.gz`,
+      existing corpus copy before downloading. The path was not present on
+      this machine, so the official archives were downloaded.
+- [x] Download from OpenSLR (SLR12): `train-clean-100.tar.gz`,
       `dev-clean.tar.gz`, `test-clean.tar.gz`; extract under
       `data/LibriSpeech/` (gitignored).
-- [ ] Generate manifests: `python3 librispeech_prepare.py --data-dir
+- [x] Generate manifests: `python3 librispeech_prepare.py --data-dir
       data/LibriSpeech` → `path,duration,text` CSVs under `data/`.
-- [ ] Copy the recovered 12-WAV testset + refs into `tests/fixtures/testset/`
+- [x] Copy the recovered 12-WAV testset + refs into `tests/fixtures/testset/`
       (committed; ~850 KB) and note provenance in a short
       `tests/fixtures/README.md`.
 
@@ -155,6 +160,12 @@ are in-repo.
   PYTORCH_ENABLE_MPS_FALLBACK=1 python3 train_CTC.py --epochs 1 --sanity` →
   exit 0 (CI-equivalent still green; no new sanity-path imports).
 
+**Recorded 2026-07-27:** imports exited 0
+(`torchaudio 2.8.0`, `librosa 0.11.0`, `soundfile 0.13.1`);
+train/dev/test manifests contain 28,539 / 2,703 / 2,620 rows with zero missing
+paths, empty transcripts, or non-positive durations; the CI-equivalent sanity
+run exited 0 with loss 36.2281 → 27.6546.
+
 ---
 
 ### Phase 1: Contracts + Verification Layer, Before Any Training (~2–3 days)
@@ -162,6 +173,12 @@ are in-repo.
 **Goal:** `vocab_size=29` end-to-end; a CTC export path with an explicit
 state/chunk contract; a parity harness that passes on random weights. No
 training yet.
+
+**Skills:** `coreml-validate` — this phase's core deliverable
+(`scripts/validate_parity.py`) *is* that skill's numerical-parity job, run
+here on random weights instead of trained ones. Invoke it once the harness
+exists to confirm the correlation/max-error methodology matches repo
+convention before trusting the exit code.
 
 **Tasks:**
 
@@ -215,6 +232,12 @@ training yet.
 
 **Goal:** A converged `checkpoints/best.pt` with dev-clean greedy WER ≤ 0.25.
 
+**Skills:** `debug` — use it for the NaN-at-~200-steps root-cause task
+specifically (systematic investigation, Context7 for any PyTorch/MPS
+numerics question, a consolidated `write-notes` entry as its required final
+step). Do not reach for it for the routine training-loop work, only the
+stuck-and-unclear failure mode.
+
 **Tasks:**
 
 - [ ] Root-cause the historical NaN-at-~200-steps on real data
@@ -246,6 +269,14 @@ training yet.
 
 **Goal:** A validated `.mlpackage` with measured accuracy and latency; docs
 telling the truth; handoff per the `deploy` skill.
+
+**Skills:** `coreml-validate` for the FP32/FP16 parity gate on trained
+weights; `coreml-profile` to check actual compute-unit placement before
+claiming ANE anywhere (replaces guessing from the Xcode "estimated" tab);
+`bakeoff` for the `cpu`/`cpu-gpu`/`all` latency sweep — it already knows how
+to prepare inputs, build the Swift runner, and record into
+`README/training-notes.md`, so use it instead of hand-rolling the sweep;
+`deploy` for the final handoff gate and release tagging.
 
 **Tasks:**
 
@@ -408,9 +439,9 @@ spent on it.
 
 #### Phase 0: Environment + Data
 
-- [ ] Audio stack installed and importable
-- [ ] LibriSpeech downloaded, manifests generated
-- [ ] Fixtures committed under `tests/fixtures/testset/`
+- [x] Audio stack installed and importable
+- [x] LibriSpeech downloaded, manifests generated
+- [x] Fixtures committed under `tests/fixtures/testset/`
 
 #### Phase 1: Contracts + Verification Layer
 
@@ -434,6 +465,17 @@ spent on it.
 ### Debug Notes
 
 Append real issues encountered during implementation with fixes.
+
+- **2026-07-27 — Phase 0:** the plan's one-command
+  `librispeech_prepare.py --data-dir ...` interface did not exist, and `data/`
+  was not ignored. Added the compatible three-split command, retained the
+  legacy `--root/--split` path, and added `data/` to `.gitignore`. The primary
+  OpenSLR mirror stalled at 79% of train-clean-100; a resumable transfer via
+  the official `openslr.trmal.net` mirror completed the same archive. Published
+  MD5s matched before extraction:
+  `2a93770f6d5c6c964bc36631d331a522` (train),
+  `42e2234ba48799c1f50f24a7926300a1` (dev), and
+  `32fa31d27d2e1cad72775fee3f4849a9` (test).
 
 ---
 
