@@ -41,6 +41,13 @@ commits, push, and CI monitoring. Implicit routing does not. If a git-writing
 workflow skill was not invoked explicitly, stop before commit or push and call
 out the mismatch.
 
+### Remember: Think scrappy
+
+You are a scrappy, god-tier startup CTO. You learned from the best — Paul
+Graham, Nikita Bier, John Carmack. You know when to do things the fast, hacky
+way and when to do things properly. You don't over-engineer. You move fast and
+keep it simple.
+
 ## START HERE: Architecture Documentation
 
 When starting work on this codebase, orient yourself by reading the README and perusing the `/README` and `/docs` directories.
@@ -60,6 +67,44 @@ Struggling with a tricky bug or issue? Look inside [README/Guides](README/Guides
 
 **Load-bearing paths — do not move or renumber.** `README/Mamba-on-Apple-Silicon.md` is cited **by section number** from `train_CTC.py`, `train_RNNT.py`, `utils/metrics.py`, `utils/tokenizer.py`, and `benchmarks/bench_mps.py`. `README/training-notes.md` and `README/implementation-plan-v2.md` are read **at runtime** by `scripts/report_phase3.sh` and `scripts/run_phase2_baselines.sh`.
 
+## Ground truth (audited 2026-07-27) — read before trusting any other doc
+
+A four-lane read-only audit (ledger: `COORD.md`) found the docs ahead of
+reality. Every fact below was verified on this machine (M2 Ultra, 64 GB,
+torch 2.8.0, MPS available). When you fix one, update this section — it is the
+anti-rot anchor.
+
+- **No trained model exists, anywhere.** No `.pt`/`.ckpt` checkpoint survives on
+  this machine; every recovered `.mlpackage` is a weight-stripped shell.
+  `checkpoints/`, `exports/`, `data/` are absent. Docs citing them are
+  historical.
+- **No real-audio accuracy was ever achieved.** Best ever: CER ≈0.86 on
+  synthetic audio; real-audio WER was always 1.000. Root cause: the encoder
+  emits 1024 logits while decoding expects the 29-char vocab
+  (`README/implementation-plan-v2.md:337`). Audit recommendation (pending
+  plan): train `vocab_size=29` end-to-end and delete the 1024→29 projection
+  hack.
+- **RNN-T training is broken.** `modules/rnnt_loss_mps.py:249` returns a
+  gradient-less constant when no backend is installed, and the dispatch at
+  `train_RNNT.py:706` makes the advertised naive/CTC fallback unreachable; the
+  naive backend independently breaks autograd via in-place mutation.
+- **The export pipeline has no parity gate.** `scripts/export_coreml.py`
+  exports a randomly initialized model by default, and the pipeline still
+  prints "ready for deployment". No PyTorch↔Core ML numerical comparison
+  exists on any path.
+- **`ct.StateType` is used nowhere** — recurrence is plain tensor I/O
+  (`predictor_hidden_in`/`predictor_hidden_out`). Export and the Swift runner
+  agree on chunk=256 only by coincidence of two hardcoded defaults; the
+  documented `--chunk 512` flow crashes at predict time.
+- **ANE placement was never demonstrated.** The fastest measured config is
+  CPU-only (~3 ms/chunk). "Targets the ANE" is aspiration, not result.
+- **Environment gap:** the active `python3` lacks `torchaudio`, `librosa`, and
+  `soundfile` — real-audio training and eval cannot run until they are
+  installed.
+- **Green today:** CTC sanity (exit 0), `benchmarks/bench_selective_scan.py`,
+  `swift build` of MambaASRRunner, and the (unvalidated) random-weight
+  export→compile→Swift streaming loop.
+
 ## Verification: there is no test suite
 
 This repo has **no `test_*.py` files, no `pyproject.toml`, and no configured lint.** Never claim "tests pass." The mechanical gate — exactly what CI runs — is:
@@ -72,7 +117,7 @@ Per-surface checks:
 
 | Surface touched | Check |
 | --- | --- |
-| RNN-T path | `PYTHONPATH="$PWD" python3 train_RNNT.py --epochs 1 --sanity` |
+| RNN-T path | `PYTHONPATH="$PWD" python3 train_RNNT.py --epochs 1 --sanity` — **exits 1 as of 2026-07-27** (see Ground truth) |
 | Core ML export | `python3 scripts/export_and_validate.py` |
 | SSM kernels | `python3 benchmarks/bench_selective_scan.py` |
 | MPS performance | `python3 benchmarks/bench_mps.py` |
@@ -199,7 +244,7 @@ ml.save("MambaASR.mlpackage")
 
 - **Inputs:** must match trace dummy; use `ct.RangeDim`/`ct.EnumeratedShapes` for variable seq-length.
 - **`minimum_deployment_target`** doubles as feature flag and debug lever — drop it if a new op breaks.
-- **States:** for streaming recurrence, register `torch.register_buffer` and pass `states=[ct.StateType(...)]`. This repo does exactly that for the Mamba hidden state — see [scripts/export_coreml.py](scripts/export_coreml.py).
+- **States:** for streaming recurrence, register `torch.register_buffer` and pass `states=[ct.StateType(...)]`. This repo does **not** do that yet: [scripts/export_coreml.py](scripts/export_coreml.py) carries recurrence as plain tensor I/O (`predictor_hidden_in`/`predictor_hidden_out`) via `torch.jit.trace` at iOS16/FP32/`CPU_ONLY` defaults. Migrating to `StateType` is an open task (see Ground truth), not a done fact.
 
 ---
 

@@ -14,8 +14,9 @@ The review checklist is
 
 | Plan | Covers |
 | --- | --- |
-| [README/implementation-plan.md](../implementation-plan.md) | Original Phase 1–4 roadmap |
-| [README/implementation-plan-v2.md](../implementation-plan-v2.md) | Current roadmap; Phase 3 optimization |
+| [v1-ship-ctc29.md](v1-ship-ctc29.md) | **Active.** v1 ship: CTC-29 end-to-end — env+data → contracts+parity → train → export/eval/handoff |
+| [README/implementation-plan.md](../implementation-plan.md) | Original Phase 1–4 roadmap (historical) |
+| [README/implementation-plan-v2.md](../implementation-plan-v2.md) | Predecessor roadmap; Phase 3 optimization (superseded by the audit — see `CLAUDE.md` Ground truth) |
 
 Both live at the top level of `README/`. `implementation-plan-v2.md` is read at
 runtime by [scripts/report_phase3.sh](../../scripts/report_phase3.sh) and
