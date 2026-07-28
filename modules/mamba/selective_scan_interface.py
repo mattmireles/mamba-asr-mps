@@ -12,20 +12,18 @@ Architectural Context:
 - Device Support: CPU, CUDA, MPS (Apple Silicon)
 
 Implementation Philosophy:
-- This is a "naive" implementation using sequential Python loops
-- Designed for functional validation, not performance
+- Pure PyTorch affine prefix scan with ordinary autograd
 - Follows the mathematical formulation from the Mamba paper
-- Intentionally avoids optimization to maintain clarity for AI developers
+- Avoids custom kernels while removing per-timestep Python dispatch
+- Keeps one portable graph for training and Core ML export
 
 Performance Expectations:
-- Sequential loop creates dispatch overhead on GPU
-- Memory bandwidth bound due to lack of kernel fusion
-- Expected 10-100x slower than optimized Metal kernels
-- Suitable for prototyping, not production training
+- Logarithmic graph depth through a Hillis-Steele inclusive scan
+- More temporary memory than a fused custom kernel
+- Portable across CPU, CUDA, MPS, and the Core ML tracing path
 
 Future Optimization Path:
-- Phase 2: Custom Metal kernel with parallel scan algorithm
-- Phase 3: Kernel fusion for memory bandwidth optimization
+- Optional custom Metal kernel and fusion only if measured gates demand them
 - See README/Mamba-on-Apple-Silicon.md Section 3.2 for Metal implementation
 
 References:
@@ -77,6 +75,45 @@ class SelectiveScanConstants:
         """
 
 
+def _parallel_affine_scan(
+    transition: torch.Tensor,
+    update: torch.Tensor,
+    initial_state: torch.Tensor,
+) -> torch.Tensor:
+    """Evaluate ``h_t = a_t*h_(t-1) + b_t`` in logarithmic scan depth.
+
+    Each timestep is an affine transform ``(a, b)``. Composition is
+    associative: ``(a2, b2) ∘ (a1, b1) = (a2*a1, b2 + a2*b1)``. A
+    Hillis–Steele inclusive scan therefore removes the Python timestep loop
+    while preserving ordinary PyTorch autograd and device portability.
+    """
+    prefix_a = transition
+    prefix_b = update
+    offset = 1
+    sequence_length = transition.shape[1]
+    while offset < sequence_length:
+        right_a = prefix_a[:, offset:]
+        right_b = prefix_b[:, offset:]
+        left_a = prefix_a[:, :-offset]
+        left_b = prefix_b[:, :-offset]
+        prefix_a = torch.cat(
+            [
+                prefix_a[:, :offset],
+                right_a * left_a,
+            ],
+            dim=1,
+        )
+        prefix_b = torch.cat(
+            [
+                prefix_b[:, :offset],
+                right_b + right_a * left_b,
+            ],
+            dim=1,
+        )
+        offset *= 2
+    return prefix_a * initial_state.unsqueeze(1) + prefix_b
+
+
 def selective_scan(
     x: torch.Tensor,        # (B, L, D) - Input sequence features
     delta: torch.Tensor,    # (B, L, D) - Time-varying discretization steps  
@@ -101,30 +138,28 @@ def selective_scan(
     4. Gating: output = y * sigmoid(z)
     
     Implementation Strategy:
-    - Sequential loop over time dimension (not parallel)
-    - Uses explicit tensor operations for MPS compatibility
-    - Avoids complex einsum operations that may fall back to CPU
-    - Prioritizes numerical stability over raw performance
+    - Associative affine prefix scan over the time dimension
+    - Uses explicit tensor operations for MPS and tracing compatibility
+    - Preserves ordinary PyTorch autograd without a custom kernel
+    - Keeps the recurrence's exact initial-state and final-state contract
     
     Performance Characteristics:
-    - Time Complexity: O(B * L * D * N) - sequential in L
-    - Memory Complexity: O(B * D * N) - state size independent of sequence length
-    - GPU Utilization: Low due to Python loop dispatch overhead
+    - Work Complexity: O(B * L * D * N * log L)
+    - Graph Depth: O(log L)
+    - Memory Complexity: O(B * L * D * N)
     - MPS Fallback Risk: Minimal - uses only well-supported operations
     
     Apple Silicon Considerations:
     - Unified memory reduces CPU-GPU transfer cost
-    - Small tensor operations may be slower than CPU
-    - Kernel dispatch overhead dominates computation time
-    - Suitable for validation, not production performance
+    - Large elementwise stages replace per-timestep kernel dispatch
+    - The graph also converts through the Core ML tracing path
     
     Called By:
     - MambaBlock.forward() at mamba_blocks.py:67
     - Used in both CTC and RNN-T training pipelines
     
-    Next Phase:
-    - Replace with fused Metal kernel for 10-100x speedup
-    - Implement parallel scan algorithm for true GPU utilization
+    Future Optimization:
+    - Consider a fused Metal kernel only if measured gates demand it
     - See README/Mamba-on-Apple-Silicon.md Section 3.2
     
     Args:
@@ -164,7 +199,7 @@ def selective_scan(
 
     # Profiling annotation for performance analysis on Apple Silicon
     # Enables detailed timing analysis via PyTorch profiler and Instruments
-    with record_function("selective_scan_naive"):
+    with record_function("selective_scan_parallel"):
         # Step 1: Discretize parameters using softplus for numerical stability
         with record_function("ss_softplus_discretize"):
             delta_positive = F.softplus(delta + delta_bias.view(1, 1, -1))  # (B, L, D)
@@ -181,28 +216,17 @@ def selective_scan(
             delta_u = delta_positive * x  # (B, L, D)
             delta_B_u = delta_u.unsqueeze(-1) * B_proj.unsqueeze(2)  # (B, L, D, N)
 
-        # Step 4: Initialize state and output accumulation
-        hidden_state = h0.clone()  # (B, D, N)
-        output_timesteps = []
+        # Step 4: Parallel affine prefix scan over time.
+        with record_function("ss_parallel_scan"):
+            hidden_states = _parallel_affine_scan(delta_A, delta_B_u, h0)
+            hidden_state = hidden_states[:, -1]
+            output_sequence = (
+                hidden_states * C_proj.unsqueeze(2)
+            ).sum(dim=-1)
 
-        # Step 5: Sequential state update loop (bottleneck)
-        with record_function("ss_time_loop"):
-            for timestep in range(seq_len):
-                hidden_state = delta_A[:, timestep] * hidden_state + delta_B_u[:, timestep]
-                C_timestep = C_proj[:, timestep, :]  # (B, N)
-                # Implementation switch for inner product: default to einsum.
-                # Set env MAMBA_EINSUM_IMPL=bmm to force batched matmul path.
-                if os.environ.get("MAMBA_EINSUM_IMPL", "einsum").lower() == "bmm":
-                    # Shapes: hidden_state (B, D, N) @ C_timestep.unsqueeze(-1) (B, N, 1) -> (B, D, 1)
-                    y_timestep = torch.bmm(hidden_state, C_timestep.unsqueeze(-1)).squeeze(-1)
-                else:
-                    y_timestep = torch.einsum("bdn,bn->bd", hidden_state, C_timestep)
-                output_timesteps.append(y_timestep)
-
-        # Step 6: Combine outputs and apply residual connections
+        # Step 5: Combine outputs and apply residual connections
         # Gate only the SSM output; D*x skip bypasses the gate (canonical Mamba)
         with record_function("ss_output_post"):
-            output_sequence = torch.stack(output_timesteps, dim=1)  # (B, L, D)
             skip_connection = x * D.view(1, 1, -1)
             gating_weights = torch.sigmoid(z)
             final_output = output_sequence * gating_weights + skip_connection

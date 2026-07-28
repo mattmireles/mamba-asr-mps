@@ -191,15 +191,87 @@ def main() -> None:
                --glob "outputs/*/transcript_*.txt"
     """
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", required=True, help="Path to ground-truth reference text")
+    ap.add_argument("--ref", help="Path to one ground-truth reference text (legacy runner-output mode)")
     ap.add_argument("--glob", default=TextProcessingConstants.DEFAULT_TRANSCRIPT_PATTERN, help="Glob for transcript files")
-    ap.add_argument("--out", required=True, help="Output markdown path")
+    ap.add_argument("--out", help="Optional output markdown path (required in legacy runner-output mode)")
+    ap.add_argument("--predictions", help="One normalized prediction per line")
+    ap.add_argument("--references", help="One normalized reference per line")
     ap.add_argument("--cer-threshold", type=float, default=None, help="Fail if any CER exceeds this value")
     ap.add_argument("--wer-threshold", type=float, default=None, help="Fail if any WER exceeds this value (informational if --cer-only)")
     ap.add_argument("--strict", action="store_true", help="Fail if any transcript is missing/empty")
     ap.add_argument("--cer-only", action="store_true", help="Compute and gate on CER only; WER reported as info")
     args = ap.parse_args()
 
+    if args.predictions or args.references:
+        if not args.predictions or not args.references:
+            raise SystemExit("--predictions and --references must be supplied together")
+        prediction_path = Path(args.predictions)
+        reference_path = Path(args.references)
+        if not prediction_path.is_file():
+            raise SystemExit(f"Predictions file not found: {prediction_path}")
+        if not reference_path.is_file():
+            raise SystemExit(f"References file not found: {reference_path}")
+        predictions = prediction_path.read_text(encoding="utf-8").splitlines()
+        references = reference_path.read_text(encoding="utf-8").splitlines()
+        if len(predictions) != len(references):
+            raise SystemExit(
+                "Prediction/reference line-count mismatch: "
+                f"{len(predictions)} != {len(references)}"
+            )
+        if not references:
+            raise SystemExit("Prediction/reference files are empty")
+
+        char_errors = 0
+        char_total = 0
+        word_errors = 0
+        word_total = 0
+        for prediction, reference in zip(predictions, references):
+            hyp = normalize_text_for_eval(prediction)
+            ref = normalize_text_for_eval(reference)
+            hyp_chars = list(hyp.replace(" ", ""))
+            ref_chars = list(ref.replace(" ", ""))
+            hyp_words = hyp.split()
+            ref_words = ref.split()
+            char_errors += levenshtein(hyp_chars, ref_chars)
+            char_total += len(ref_chars)
+            word_errors += levenshtein(hyp_words, ref_words)
+            word_total += len(ref_words)
+
+        cer_rate = char_errors / max(1, char_total)
+        wer_rate = word_errors / max(1, word_total)
+        print(
+            f"utterances={len(references)} CER={cer_rate:.6f} "
+            f"WER={wer_rate:.6f} char_errors={char_errors}/{char_total} "
+            f"word_errors={word_errors}/{word_total}"
+        )
+        if args.out:
+            out_path = Path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(
+                "# WER/CER Overview\n\n"
+                f"Predictions: {prediction_path}\n\n"
+                f"References: {reference_path}\n\n"
+                "| utterances | CER | WER |\n"
+                "|---:|---:|---:|\n"
+                f"| {len(references)} | {cer_rate:.6f} | {wer_rate:.6f} |\n",
+                encoding="utf-8",
+            )
+            print(f"Wrote {out_path}")
+        if args.cer_threshold is not None and cer_rate > args.cer_threshold:
+            raise SystemExit(3)
+        if (
+            not args.cer_only
+            and args.wer_threshold is not None
+            and wer_rate > args.wer_threshold
+        ):
+            raise SystemExit(3)
+        return
+
+    if not args.ref or not args.out:
+        raise SystemExit(
+            "legacy runner-output mode requires --ref and --out; "
+            "corpus mode requires --predictions and --references"
+        )
     ref_path = Path(args.ref)
     if not ref_path.exists():
         raise SystemExit(f"Reference file not found: {ref_path}\nPlace the ground-truth text here and re-run.")

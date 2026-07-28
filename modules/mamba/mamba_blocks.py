@@ -24,15 +24,13 @@ MPS-Specific Adaptations:
 - Fallback-compatible operations throughout
 
 Performance Characteristics:
-- Dominated by selective_scan sequential loop overhead
+- Selective scan uses a logarithmic-depth affine prefix graph
 - Linear projections well-optimized on Apple Silicon
 - Conv1d operations leverage Metal Performance Shaders
-- Memory usage: O(B * L * D + B * D * N) per block
+- Memory usage: O(B * L * D * N) per block during the prefix scan
 
 Optimization Roadmap:
-- Phase 2: Custom Metal kernel for selective_scan
-- Phase 3: Fused block operations
-- Phase 4: Multi-block kernel fusion
+- Consider custom fusion only after correctness and deployment gates pass
 - See README/Mamba-on-Apple-Silicon.md for detailed optimization strategy
 
 References:

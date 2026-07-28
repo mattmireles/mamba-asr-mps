@@ -74,15 +74,18 @@ reality. Every fact below was verified on this machine (M2 Ultra, 64 GB,
 torch 2.8.0, MPS available). When you fix one, update this section — it is the
 anti-rot anchor.
 
-- **No trained model exists yet.** Local `.pt` files under gitignored
-  `exports/` are deterministic random references for the parity gate, not
-  trained checkpoints. Real LibriSpeech data is ready under gitignored
-  `data/`; accuracy work begins in Plan v1 Phase 2.
-- **No real-audio accuracy was ever achieved.** Best historical result:
-  CER ≈0.86 on synthetic audio; real-audio WER was always 1.000. The
-  1024-vs-29 contract break is now removed from the CTC v1 path: training,
-  export, and Swift use 29 logits directly. Accuracy remains unverified until
-  the Phase 2 checkpoint reaches its dev-clean gate.
+- **A real CTC-29 checkpoint exists, but it is not shippable.** Plan v1
+  Phase 2 trained a 1.92M-parameter d256/6-block model on LibriSpeech
+  train-clean-100. The protected local checkpoint is
+  `checkpoints/v1-ctc29/best.pt` (gitignored, epoch 10); no weights are in
+  git.
+- **The Phase 2 accuracy gate failed.** Independent full-dev evaluation over
+  all 2,703 dev-clean utterances measured CER `0.222494` and WER `0.612790`
+  (`52,677/236,757` character errors and `33,337/54,402` word errors), versus
+  required WER ≤ `0.25`. Two ten-epoch schedules completed with zero
+  non-finite losses or gradients and did not close the gap. Per the plan's
+  stop rule, Phase 3 export/eval/release must not start; the next controlled
+  experiment is train-clean-100 + train-clean-360 with d256/6 held fixed.
 - **RNN-T training is broken.** `modules/rnnt_loss_mps.py:249` returns a
   gradient-less constant when no backend is installed, and the dispatch at
   `train_RNNT.py:706` makes the advertised naive/CTC fallback unreachable; the
@@ -107,7 +110,8 @@ anti-rot anchor.
   The corpus and manifests live under gitignored `data/`.
 - **Green today:** CTC sanity, `benchmarks/bench_selective_scan.py`, Swift
   release build, default d256/6-block random CTC export, three-chunk
-  PyTorch↔Core ML parity, and contract-driven Swift real-WAV inference.
+  PyTorch↔Core ML parity, contract-driven Swift real-WAV inference, and
+  finite full-corpus CTC training. Accuracy is not green.
 
 ## Verification: there is no test suite
 

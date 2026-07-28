@@ -1,7 +1,7 @@
 # v1 Ship: CTC-29 End-to-End On-Device ASR Plan
 
 **Date:** 2026-07-27
-**Status:** In Progress — Phase 1 complete (2026-07-27)
+**Status:** Stopped at Phase 2 accuracy gate — scale-up required (2026-07-27)
 
 ## Executive Summary
 
@@ -61,8 +61,9 @@ artifact running on this machine, with every claim backed by a command.
   wrapper, parity harness, Swift runner CTC mode, LibriSpeech eval.
 - **Constraints:** Training runs locally on the M2 Ultra (64 GB). MPS
   `aten::_ctc_loss` falls back to CPU (`PYTORCH_ENABLE_MPS_FALLBACK=1`
-  required); measured synthetic throughput is 42.9% of the repo's target, so
-  budget ~2–4 h/epoch on 100 h of audio (estimate, verify in Phase 2).
+  required). After duration bucketing and the parallel selective scan,
+  measured full-corpus training compute was 25.7–59.7 minutes per epoch,
+  excluding full-dev validation.
 - **Guardrails:** Load-bearing docs stay put (`README/Mamba-on-Apple-Silicon.md`
   section numbers; `README/training-notes.md` and
   `README/implementation-plan-v2.md` are read at runtime by
@@ -86,9 +87,11 @@ artifact running on this machine, with every claim backed by a command.
 
 ## Already Shipped (Do Not Re-Solve)
 
-- **Selective scan kernel:** pure-PyTorch, MPS-clean, 22–24k tok/s flat from
-  seq 256→8192 (`benchmarks/bench_selective_scan.py`, 2026-07-27). Not a
-  bottleneck; do not hand-optimize it in this plan.
+- **Selective scan kernel:** pure-PyTorch, MPS-clean logarithmic affine prefix
+  scan. The Phase 2 real-data probe falsified the old "not a bottleneck"
+  claim: the parallel graph plus duration bucketing and batch 8 increased a
+  d256/6-block probe from 2.84 to 8.51 samples/s while retaining exact
+  float64 forward/gradient parity with the literal recurrence.
 - **CTC sanity gate:** green (exit 0, loss 55.4→42.2 on MPS, 3 s).
 - **Swift runner:** builds clean; computes its own 80-mel log-spectrogram
   (n_fft 512, win 400, hop 160) in Swift, so DSP stays outside the graph.
@@ -104,16 +107,19 @@ artifact running on this machine, with every claim backed by a command.
 - **Architecture:** ConMambaCTC (causal conv frontend ×2 stride-2 → 6×
   MambaBlock d256 → 29-logit linear head), 4× time reduction. Streaming
   carries eight mel frames plus each block's Mamba state.
-- **Metrics:** no trained checkpoint exists anywhere on this machine; best
-  historical accuracy CER ≈0.86 on synthetic audio; real WER always 1.000.
+- **Metrics:** a real d256/6-block train-clean-100 checkpoint now exists under
+  gitignored `checkpoints/`, but it is not shippable. Independent full
+  dev-clean evaluation measured CER `0.222494` and WER `0.612790` over 2,703
+  utterances; the required WER is ≤ `0.25`.
 - **Known gaps:** the audio environment and three required LibriSpeech splits
   are ready locally; direct CTC export, numerical parity, and the Swift
-  contract are proven on random weights. No trained checkpoint exists yet.
+  contract are proven on random weights. Trained export, test-clean accuracy,
+  latency, handoff, and release are blocked by the Phase 2 accuracy gate.
 
 ## Solution Overview
 
 Order the work so everything cheap that could invalidate the expensive step
-runs first. The week-long training run is the costly step; the contracts and
+runs first. The full training run is the costly step; the contracts and
 the parity harness are cheap and work on random weights — build and prove
 them before training.
 
@@ -245,7 +251,7 @@ unrelated pre-existing worktree modification and was excluded.
 
 ---
 
-### Phase 2: Train to Convergence (~2–3 days code + ~1 week wall-clock)
+### Phase 2: Train to Convergence (~2–3 days code + 12.6 h measured training compute)
 
 **Goal:** A converged `checkpoints/best.pt` with dev-clean greedy WER ≤ 0.25.
 
@@ -257,17 +263,17 @@ stuck-and-unclear failure mode.
 
 **Tasks:**
 
-- [ ] Root-cause the historical NaN-at-~200-steps on real data
+- [x] Root-cause the historical NaN-at-~200-steps on real data
       (`README/training-notes.md:15-20` recorded skipping, not solving).
       Time-box: reproduce within ~300 steps on train-clean-100, then
       investigate (suspects to check, not conclusions: CTC inf-cost samples
       where `T' < target_len`, LR warmup absence, MPS fallback numerics).
       Fix in `train.py` / `modules/`, document in Debug Notes.
-- [ ] Full run via `train.py`: train-clean-100 manifest, dev-clean
+- [x] Full run via `train.py`: train-clean-100 manifest, dev-clean
       validation each epoch, AdamW lr 3e-4, grad clip, checkpointing to
       `checkpoints/` (gitignored), metrics CSV committed to
       `README/training-notes.md` as a summarized table (not the raw CSV).
-- [ ] Stop rule: if two full runs plus one tuning round miss WER ≤ 0.25,
+- [x] Stop rule: if two full runs plus one tuning round miss WER ≤ 0.25,
       STOP and write a scale-up decision memo (more data: +train-clean-360
       vs. deeper model) instead of silently grinding.
 
@@ -279,6 +285,19 @@ stuck-and-unclear failure mode.
 - Loss curve summarized in `README/training-notes.md`; no NaN step-skips in
   the final run's log.
 - Mechanical gate: CTC sanity → exit 0.
+
+**Recorded 2026-07-27:** the independent evaluator and the executable corpus
+scorer agreed on CER `0.222494` and WER `0.612790` over all 2,703 dev-clean
+utterances (`52,677/236,757` character errors and `33,337/54,402` word
+errors). The scorer's `--wer-threshold 0.25` gate exited 3. Two bounded
+ten-epoch schedules completed with zero non-finite losses, zero non-finite
+gradients, zero invalid samples, and zero empty valid batches. The stop rule
+therefore fired; Phase 3 did not start. Current-code closeout gates passed:
+MPS and forced-CPU CTC sanity, checkpoint/resume smoke, repeat-aware CTC and
+sampler-continuity checks, float64 selective-scan forward/gradient parity,
+MPS scan benchmark, and a fresh default d256/6 Core ML export
+(`4107377e...`) with three-chunk correlation `1.000000000`, maximum logit
+error `1.25169754e-05`, and matching full/chunked/Core ML transcripts.
 
 ---
 
@@ -355,7 +374,8 @@ to prepare inputs, build the Swift runner, and record into
 
 - [ ] All four phase verifications recorded (exit codes + numbers) in
       `README/training-notes.md`.
-- [ ] `CLAUDE.md` Ground truth section reflects the new reality.
+- [x] `CLAUDE.md` Ground truth section reflects the new reality through the
+      Phase 2 stop.
 - [ ] Release tagged; `docs/INTEGRATION_GUIDE.md` matches the shipped
       contract.
 - [ ] Follow-up plans (RNN-T repair, Phase-3 optimization, StateType) listed
@@ -368,17 +388,20 @@ to prepare inputs, build the Swift runner, and record into
 - **Q:** CTC-first or fix RNN-T first? **A:** CTC-first — it trains today;
   RNN-T is the largest broken surface and v1 does not need it (2026-07-27
   assessment, ratified by plan invocation).
-- **Q:** Which corpus? **A:** train-clean-100 first; scale is a Phase 2 stop-
-  rule decision, not a default.
+- **Q:** Which corpus? **A:** train-clean-100 first. The Phase 2 stop rule
+  fired at WER `0.612790`; the next experiment should add train-clean-360
+  while holding d256/6 fixed.
 - **Q:** Decoding? **A:** Greedy only for v1.
+- **Q:** More data or a deeper model after the Phase 2 miss? **A:** More data
+  first. Train loss continued down while dev loss and WER plateaued, so
+  train-clean-360 is the simpler test of the observed generalization gap.
+  Reconsider capacity only after that controlled data-scale run.
 
 ### Unresolved
 
-- **Q:** Is WER ≈ 0.20–0.25 acceptable for the intended product use?
-  **Options:** ship as v1 demo / hold for train-clean-360 / hold for LM
-  decoding. Lean: ship the demo, decide with the real number in hand.
 - **Q:** FP16 or FP32 as the shipped default? Decided by Phase 3 parity +
-  latency measurements.
+  latency measurements, deferred until a future checkpoint passes the
+  accuracy gate.
 
 ## References
 
@@ -432,22 +455,22 @@ spent on it.
 | --- | --- | --- |
 | Per-chunk inference (contract chunk) | < 50 ms | 3.17 ms (random weights, CPU, 2026-07-27) |
 | RTF, best compute mode | < 0.3 | unmeasured on trained weights |
-| Training epoch, train-clean-100 | ~2–4 h (estimate) | unmeasured |
+| Training epoch, train-clean-100 | bounded local run | 25.7–59.7 min training compute, excluding validation |
 
 ### Risks and Mitigations
 
-- **NaN root cause is unknown:** could stall Phase 2 → time-boxed
-  investigation with the `debug` skill; suspects listed, not presumed;
-  escalate to a scale/precision decision memo rather than grinding.
-- **CTC-loss CPU fallback throughput (42.9% of target):** epochs may run
-  long → measure epoch 1 wall-clock, tune batch size via
-  `config/apple_silicon_config.py`, accept longer wall-clock before adding
-  complexity.
+- **Historical NaN premise:** resolved as an RNN-T incident, not direct CTC.
+  The CTC loop now enforces repeat-aware feasibility and rejects non-finite
+  losses or gradients explicitly.
+- **CTC-loss CPU fallback throughput:** mitigated by duration bucketing,
+  batch 8, and the parallel selective scan; both ten-epoch runs completed
+  locally without a numerical failure.
 - **Chunk-boundary degradation in streaming CTC:** conv frontend overlap may
   hurt at boundaries → Phase 1 measures it; carry left-context only if the
   measurement demands it.
-- **WER lands above 0.25:** stop rule triggers a deliberate scale-up decision
-  (train-clean-360 vs. deeper model) with the M2 Ultra able to absorb either.
+- **WER landed above 0.25:** the stop rule fired. Add train-clean-360 while
+  holding architecture and evaluation fixed; do not deepen the model or start
+  Phase 3 in this plan.
 - **Doc-runtime coupling:** `scripts/report_phase3.sh` reads
   `README/training-notes.md` at runtime → append, don't restructure, when
   recording results.
@@ -469,8 +492,10 @@ spent on it.
 
 #### Phase 2: Train to Convergence
 
-- [ ] NaN root-caused and fixed (Debug Notes entry)
-- [ ] Full run complete; dev-clean WER ≤ 0.25 recorded
+- [x] NaN root-caused and current CTC loop hardened (Debug Notes entry)
+- [x] Two ten-epoch schedules complete; exact full-dev metrics recorded
+- [x] Stop rule applied; train-clean-360 chosen before deeper capacity
+- [ ] dev-clean WER ≤ 0.25 (failed: best `0.612790`)
 
 #### Phase 3: Export, Evaluate, Hand Off
 
@@ -508,6 +533,49 @@ Append real issues encountered during implementation with fixes.
   centers a shorter window inside the FFT frame even with `center=false`.
   Centering the window yielded Swift↔Python mel correlation 1.000000000,
   max error `5.13e-04`, on the first 64 frames of `utt_8.wav`.
+- **2026-07-27 — Phase 2 historical NaN:** the cited evidence at
+  `README/training-notes.md:15-20` describes an RNN-T `T′·U` alignment-grid
+  failure, not the direct CTC trainer. A seeded d256/6-block CTC run reached
+  300 real MPS batches with loss 3.3254 → 2.4990 and zero non-finite losses;
+  a CPU probe matched the early loss. All 28,539 train-clean-100 utterances
+  satisfy the repeat-aware CTC length bound. `train.py` now makes that bound
+  explicit, exposes rather than zeros infinite loss, rejects non-finite
+  gradient norms before the optimizer step, crops padded validation outputs,
+  reports WER, and writes resumable checkpoints/metrics. Context7 confirmed
+  PyTorch 2.8's `zero_infinity` behavior.
+- **2026-07-27 — Phase 2 training throughput:** the full real-data probe
+  falsified the inherited claim that selective scan was not a training
+  bottleneck. Replacing the Python timestep recurrence with an exact
+  logarithmic affine prefix scan cut a 200-sample d256/6-block MPS probe from
+  70.5 seconds to 26.8 seconds; duration bucketing plus batch 8 reduced it to
+  23.5 seconds. Float64 forward/gradient comparison against the literal
+  recurrence agreed to `8.88e-16`, and a converted Core ML smoke model passed
+  three-chunk parity (correlation 1.0, max logit error `1.67e-06`, matching
+  transcript). Batch 16 regressed, so the full run uses batch 8.
+- **2026-07-27 — Phase 2 run 1 miss:** ten epochs completed with zero
+  non-finite losses, zero non-finite gradients, and zero invalid samples.
+  The independent full-manifest scorer measured dev-clean CER `0.222494` and
+  WER `0.612790` over all 2,703 utterances, so the `0.25` WER gate failed.
+  The dataset's legacy 20-second default had silently capped the trainer's
+  first validation view at 2,642 utterances; v1 now explicitly keeps every
+  manifest row. The cosine LR reached zero while training loss was still
+  falling, so run 2 isolates that hypothesis by resuming the best weights
+  with a fresh optimizer and constant `1e-4`, without simultaneously changing
+  model size or corpus.
+- **2026-07-27 — Phase 2 stop:** run 2 completed epochs 11–20 with a constant
+  `1e-4`, zero non-finite losses, zero non-finite gradients, zero invalid
+  samples, and zero empty valid batches. Train loss fell `0.5698 → 0.4515`,
+  but dev loss ended at `0.9262` and WER never beat run 1's independently
+  measured `0.612790`. The standalone accuracy gate exited 3 at threshold
+  `0.25`. Per the stop rule, Phase 3 is blocked. The next controlled
+  experiment is train-clean-100 + train-clean-360 with d256/6 held fixed;
+  deeper capacity is deferred until data scaling is measured.
+- **2026-07-27 — Phase 2 resume order:** the machine restart after epoch 16
+  restored model, optimizer, scheduler, and global step, but the
+  duration-bucket sampler's in-memory epoch counter restarted at zero. Epochs
+  17–20 therefore reused the shuffle-seed sequence from epochs 11–14 while
+  still covering every training utterance once per epoch. Future resumes now
+  initialize the sampler counter from the checkpoint epoch.
 
 ---
 

@@ -11,9 +11,11 @@ from __future__ import annotations
 import os
 import math
 import time
+import csv
+import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import Iterator, List, Tuple
 
 # Enable CPU fallback for missing MPS ops (e.g., aten::_ctc_loss)
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
@@ -21,7 +23,7 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
 import sys
 from pathlib import Path as _PathAdd
@@ -123,7 +125,7 @@ class MambaTrainingConstants:
     # MARK: - Data Processing Constants
     
     # CTC processing constants for loss computation and decoding
-    CTC_ZERO_INFINITY = True            # Enable zero_infinity for CTC loss stability
+    CTC_ZERO_INFINITY = False           # Expose impossible alignments; filter them explicitly
     COSINE_SCHEDULER_T_MAX_FALLBACK = 1 # Minimum T_max for cosine annealing scheduler
     
     # Validation and error handling constants
@@ -137,7 +139,7 @@ class MambaTrainingConstants:
 # -----------------------------
 # Utility: device selection (MPS → CUDA → CPU)
 # -----------------------------
-def get_device() -> torch.device:
+def get_device(preference: str = "auto") -> torch.device:
     """
     Selects optimal compute device following Apple Silicon > CUDA > CPU priority hierarchy.
     
@@ -176,6 +178,12 @@ def get_device() -> torch.device:
         model = model.to(device)  # Place model on optimal device
         tensors = tensors.to(device)  # Ensure tensor-model device consistency
     """
+    if preference == "cpu":
+        return torch.device("cpu")
+    if preference == "mps":
+        if not torch.backends.mps.is_available():
+            raise RuntimeError("MPS was requested but is unavailable")
+        return torch.device("mps")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     if torch.cuda.is_available():
@@ -262,6 +270,84 @@ def ctc_collate(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str]
     return padded_feats, feat_lens_tensor, concatenated_targets, target_lens_tensor, list(texts)
 
 
+class DurationBucketBatchSampler(Sampler[List[int]]):
+    """Shuffle globally, then batch similar-duration utterances.
+
+    Sorting only within shuffled pools retains stochastic batches without
+    paying the full padding cost of unrelated short and long clips.
+    """
+
+    def __init__(
+        self,
+        durations: List[float],
+        batch_size: int,
+        bucket_size_multiplier: int,
+        seed: int,
+    ):
+        self.durations = durations
+        self.batch_size = batch_size
+        self.pool_size = batch_size * bucket_size_multiplier
+        self.seed = seed
+        self.epoch = 0
+
+    def __iter__(self) -> Iterator[List[int]]:
+        generator = random.Random(self.seed + self.epoch)
+        self.epoch += 1
+        indices = list(range(len(self.durations)))
+        generator.shuffle(indices)
+        batches: List[List[int]] = []
+        for start in range(0, len(indices), self.pool_size):
+            pool = indices[start : start + self.pool_size]
+            pool.sort(key=self.durations.__getitem__)
+            batches.extend(
+                pool[offset : offset + self.batch_size]
+                for offset in range(0, len(pool), self.batch_size)
+            )
+        generator.shuffle(batches)
+        yield from batches
+
+    def __len__(self) -> int:
+        return math.ceil(len(self.durations) / self.batch_size)
+
+
+def ctc_valid_indices(
+    targets: torch.Tensor,
+    target_lens: torch.Tensor,
+    output_lens: torch.Tensor,
+) -> Tuple[List[int], torch.Tensor, torch.Tensor]:
+    """Return samples whose CTC paths are mathematically possible.
+
+    CTC needs one extra input timestep for every adjacent repeated target
+    symbol, not merely ``output_len >= target_len``. This function is shared
+    by training and validation so ``zero_infinity`` does not silently hide
+    an impossible alignment.
+    """
+    starts = torch.cat(
+        [
+            torch.zeros(1, dtype=torch.long, device=target_lens.device),
+            target_lens[:-1].cumsum(dim=0),
+        ]
+    )
+    ends = starts + target_lens
+    valid: List[int] = []
+    for index in range(target_lens.numel()):
+        target_length = int(target_lens[index].item())
+        if target_length <= 0:
+            continue
+        start = int(starts[index].item())
+        end = int(ends[index].item())
+        target = targets[start:end]
+        adjacent_repeats = (
+            int((target[1:] == target[:-1]).sum().item())
+            if target_length > 1
+            else 0
+        )
+        minimum_input_length = target_length + adjacent_repeats
+        if int(output_lens[index].item()) >= minimum_input_length:
+            valid.append(index)
+    return valid, starts, ends
+
+
 # -----------------------------
 # Decoding and metrics (CER)
 # -----------------------------
@@ -297,7 +383,41 @@ class CERScore:
         return (self.total_errors / self.total_chars) if self.total_chars > 0 else 0.0
 
 
-def ctc_greedy_decode(logits_29: torch.Tensor, blank_id: int = MambaTrainingConstants.CTC_BLANK_TOKEN_ID) -> List[List[int]]:
+@dataclass
+class WERScore:
+    total_words: int = 0
+    total_errors: int = 0
+
+    def update(self, ref: str, hyp: str) -> None:
+        reference = ref.split()
+        hypothesis = hyp.split()
+        rows, columns = len(reference), len(hypothesis)
+        distance = [[0] * (columns + 1) for _ in range(rows + 1)]
+        for row in range(rows + 1):
+            distance[row][0] = row
+        for column in range(columns + 1):
+            distance[0][column] = column
+        for row in range(1, rows + 1):
+            for column in range(1, columns + 1):
+                cost = 0 if reference[row - 1] == hypothesis[column - 1] else 1
+                distance[row][column] = min(
+                    distance[row - 1][column] + 1,
+                    distance[row][column - 1] + 1,
+                    distance[row - 1][column - 1] + cost,
+                )
+        self.total_errors += distance[rows][columns]
+        self.total_words += max(rows, 1)
+
+    @property
+    def wer(self) -> float:
+        return self.total_errors / max(1, self.total_words)
+
+
+def ctc_greedy_decode(
+    logits_29: torch.Tensor,
+    output_lens: torch.Tensor | None = None,
+    blank_id: int = MambaTrainingConstants.CTC_BLANK_TOKEN_ID,
+) -> List[List[int]]:
     """
     Performs greedy CTC decoding on per-frame character logits for validation evaluation.
     
@@ -336,7 +456,9 @@ def ctc_greedy_decode(logits_29: torch.Tensor, blank_id: int = MambaTrainingCons
     decoded_sequences: List[List[int]] = []
     
     # Process each sequence in the batch
-    for token_sequence in predicted_tokens:
+    for index, token_sequence in enumerate(predicted_tokens):
+        if output_lens is not None:
+            token_sequence = token_sequence[: int(output_lens[index].item())]
         previous_token = blank_id
         decoded_sequence: List[int] = []
         
@@ -429,14 +551,18 @@ class TrainConfig:
     # Required dataset configuration paths
     train_csv: str                      # Path to training CSV manifest (audio_path, duration, text)
     val_csv: str                        # Path to validation CSV manifest for evaluation
+    max_duration: float = 0.0           # 0 keeps every manifest row
     
     # Training schedule configuration using named constants
     epochs: int = MambaTrainingConstants.DEFAULT_EPOCHS                       # Total training epochs for convergence
     eval_every_epochs: int = MambaTrainingConstants.DEFAULT_EVAL_EVERY_EPOCHS # Validation frequency (epochs)
     log_interval: int = MambaTrainingConstants.DEFAULT_LOG_INTERVAL           # Training step logging frequency
+    max_steps: int = 0                    # Global debug cap; 0 runs full epochs
+    target_wer: float = 0.25              # Stop after validation reaches this gate
     
     # Model architecture configuration with Apple Silicon optimizations
     batch_size: int = MambaTrainingConstants.DEFAULT_BATCH_SIZE               # Per-device batch size for memory efficiency
+    bucket_size_multiplier: int = 50      # Similar-duration pool size in batches
     d_model: int = MambaTrainingConstants.DEFAULT_D_MODEL                     # ConMamba hidden dimension
     n_blocks: int = MambaTrainingConstants.DEFAULT_N_BLOCKS                   # ConMamba encoder block count
     
@@ -444,13 +570,16 @@ class TrainConfig:
     lr: float = MambaTrainingConstants.DEFAULT_LEARNING_RATE                  # AdamW learning rate for stable training
     weight_decay: float = MambaTrainingConstants.DEFAULT_WEIGHT_DECAY         # L2 regularization strength
     grad_clip: float = MambaTrainingConstants.DEFAULT_GRADIENT_CLIP           # Gradient clipping for stability
+    scheduler: str = "cosine"           # cosine or constant
     
     # Apple Silicon system optimization configuration
     num_workers: int = MambaTrainingConstants.DEFAULT_NUM_WORKERS             # DataLoader workers (0 optimal for Apple Silicon)
     checkpoint_dir: str = MambaTrainingConstants.DEFAULT_CHECKPOINT_DIR       # Directory for model checkpoint storage
+    metrics_csv: str = ""                # Empty derives checkpoints/metrics.csv
     
     # Reproducibility configuration
     seed: int = 42                      # Random seed for deterministic training reproducibility
+    device: str = "auto"                # auto, mps, or cpu
 
 
 def set_seed(seed: int) -> None:
@@ -586,11 +715,18 @@ class PerformanceMonitor:
         self._phase = "idle"
 
 
-def run_validation(model: nn.Module, criterion: nn.CTCLoss, loader: DataLoader, device: torch.device, tokenizer: CharTokenizer) -> Tuple[float, float]:
+def run_validation(
+    model: nn.Module,
+    criterion: nn.CTCLoss,
+    loader: DataLoader,
+    device: torch.device,
+    tokenizer: CharTokenizer,
+) -> Tuple[float, float, float]:
     model.eval()
     total_loss: float = 0.0
     total_batches: int = 0
     cer_meter = CERScore()
+    wer_meter = WERScore()
 
     with torch.no_grad():
         for feats, feat_lens, targets, target_lens, texts in loader:
@@ -601,17 +737,12 @@ def run_validation(model: nn.Module, criterion: nn.CTCLoss, loader: DataLoader, 
 
             logits_29, out_lens = model(feats, feat_lens)          # (B, T', 29)
 
-            # Filter invalid samples for CTC: target_len>0 and input_len>=target_len
             with torch.no_grad():
-                starts = torch.cat([
-                    torch.zeros(1, dtype=torch.long, device=target_lens.device),
-                    target_lens[:-1].cumsum(dim=0),
-                ])
-                ends = starts + target_lens
-                good_idx: List[int] = []
-                for i in range(feats.size(0)):
-                    if target_lens[i].item() > 0 and out_lens[i].item() >= target_lens[i].item():
-                        good_idx.append(i)
+                good_idx, starts, ends = ctc_valid_indices(
+                    targets,
+                    target_lens,
+                    out_lens,
+                )
             if len(good_idx) == 0:
                 continue  # skip batch with no valid samples
             # Rebuild per-sample targets and select valid subset
@@ -626,32 +757,62 @@ def run_validation(model: nn.Module, criterion: nn.CTCLoss, loader: DataLoader, 
             tgt_lens_sel = target_lens[good_idx]
 
             loss = criterion(logp, targets_sel, out_lens_sel, tgt_lens_sel)
+            if not bool(torch.isfinite(loss).item()):
+                raise RuntimeError("validation produced a non-finite CTC loss")
             total_loss += float(loss.item())
             total_batches += 1
 
             # Greedy decode and CER
-            pred_ids_batch = ctc_greedy_decode(logits_29[good_idx])
+            pred_ids_batch = ctc_greedy_decode(
+                logits_29[good_idx],
+                out_lens[good_idx],
+            )
             for pred_ids, ref_text in zip(pred_ids_batch, [texts[i] for i in good_idx]):
                 hyp_text = ids_to_text(pred_ids, tokenizer)
                 # Simple normalization: lowercase and collapse whitespace
                 ref_norm = tokenizer.normalize(ref_text)
                 hyp_norm = tokenizer.normalize(hyp_text)
                 cer_meter.update(ref_norm, hyp_norm)
+                wer_meter.update(ref_norm, hyp_norm)
 
     avg_loss = total_loss / max(1, total_batches)
-    return avg_loss, cer_meter.cer
+    return avg_loss, cer_meter.cer, wer_meter.wer
 
 
-def save_checkpoint(path: Path, model: nn.Module, optimizer: optim.Optimizer, cfg: TrainConfig, best_cer: float | None = None, epoch: int | None = None) -> None:
+def save_checkpoint(
+    path: Path,
+    model: nn.Module,
+    optimizer: optim.Optimizer,
+    scheduler: optim.lr_scheduler.LRScheduler,
+    cfg: TrainConfig,
+    best_cer: float | None = None,
+    best_wer: float | None = None,
+    epoch: int | None = None,
+    global_step: int = 0,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     obj = {
         "state_dict": model.state_dict(),
         "optim_state": optimizer.state_dict(),
+        "scheduler_state": scheduler.state_dict(),
         "config": asdict(cfg),
         "best_cer": best_cer,
+        "best_wer": best_wer,
         "epoch": epoch,
+        "global_step": global_step,
     }
     torch.save(obj, str(path))
+
+
+def append_metrics_row(path: Path, row: dict) -> None:
+    """Append one epoch record to a local, resumable metrics CSV."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists()
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def main() -> None:
@@ -663,48 +824,72 @@ def main() -> None:
     )
     parser.add_argument("--train-csv", required=True, help="Path to training CSV manifest (path,duration,text)")
     parser.add_argument("--val-csv", required=True, help="Path to validation CSV manifest (path,duration,text)")
+    parser.add_argument("--max-duration", type=float, default=0.0, help="Optional duration cap in seconds (0 keeps the full manifest)")
     parser.add_argument("--epochs", type=int, default=MambaTrainingConstants.DEFAULT_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=MambaTrainingConstants.DEFAULT_BATCH_SIZE)
+    parser.add_argument("--bucket-size-multiplier", type=int, default=50, help="Duration-sorted pool size in batches (0 disables bucketing)")
     parser.add_argument("--lr", type=float, default=MambaTrainingConstants.DEFAULT_LEARNING_RATE)
     parser.add_argument("--weight-decay", type=float, default=MambaTrainingConstants.DEFAULT_WEIGHT_DECAY)
+    parser.add_argument("--scheduler", choices=["cosine", "constant"], default="cosine")
     parser.add_argument("--d-model", type=int, default=MambaTrainingConstants.DEFAULT_D_MODEL)
     parser.add_argument("--n-blocks", type=int, default=MambaTrainingConstants.DEFAULT_N_BLOCKS)
     parser.add_argument("--num-workers", type=int, default=MambaTrainingConstants.AUTO_DETECT_WORKERS, help="DataLoader workers (-1=auto-detect based on CPU cores)")
     parser.add_argument("--checkpoint-dir", type=str, default=MambaTrainingConstants.DEFAULT_CHECKPOINT_DIR)
+    parser.add_argument("--metrics-csv", type=str, default="", help="Epoch metrics CSV (default: <checkpoint-dir>/metrics.csv)")
+    parser.add_argument("--resume", type=str, default="", help="Resume model/optimizer/scheduler from a checkpoint")
+    parser.add_argument("--reset-optimizer", action="store_true", help="When resuming, retain model/best metrics but start a fresh optimizer and scheduler")
     parser.add_argument("--eval-every-epochs", type=int, default=MambaTrainingConstants.DEFAULT_EVAL_EVERY_EPOCHS)
     parser.add_argument("--log-interval", type=int, default=MambaTrainingConstants.DEFAULT_LOG_INTERVAL)
+    parser.add_argument("--max-steps", type=int, default=0, help="Stop after this many global batches (0=unlimited)")
+    parser.add_argument("--target-wer", type=float, default=0.25, help="Stop after validation reaches this WER (negative disables)")
     parser.add_argument("--grad-clip", type=float, default=MambaTrainingConstants.DEFAULT_GRADIENT_CLIP)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", choices=["auto", "mps", "cpu"], default="auto")
 
     args = parser.parse_args()
 
     cfg = TrainConfig(
         train_csv=args.train_csv,
         val_csv=args.val_csv,
+        max_duration=max(0.0, args.max_duration),
         epochs=args.epochs,
         batch_size=args.batch_size,
+        bucket_size_multiplier=max(0, args.bucket_size_multiplier),
         lr=args.lr,
         weight_decay=args.weight_decay,
+        scheduler=args.scheduler,
         d_model=args.d_model,
         n_blocks=args.n_blocks,
         num_workers=args.num_workers,
         checkpoint_dir=args.checkpoint_dir,
+        metrics_csv=args.metrics_csv,
         eval_every_epochs=args.eval_every_epochs,
         log_interval=args.log_interval,
+        max_steps=max(0, args.max_steps),
+        target_wer=args.target_wer,
         grad_clip=args.grad_clip,
         seed=args.seed,
+        device=args.device,
     )
 
     set_seed(cfg.seed)
-    device = get_device()
+    device = get_device(cfg.device)
     print(f"Device: {device}")
 
     # Tokenizer (for CER decoding only; not passed into workers to avoid pickling issues)
     tokenizer = CharTokenizer()
 
     # Datasets / loaders
-    train_ds = LibriSpeechCSVDataset(cfg.train_csv, sample_rate=DS.DEFAULT_SAMPLE_RATE)
-    val_ds = LibriSpeechCSVDataset(cfg.val_csv, sample_rate=DS.DEFAULT_SAMPLE_RATE)
+    train_ds = LibriSpeechCSVDataset(
+        cfg.train_csv,
+        sample_rate=DS.DEFAULT_SAMPLE_RATE,
+        max_duration=cfg.max_duration,
+    )
+    val_ds = LibriSpeechCSVDataset(
+        cfg.val_csv,
+        sample_rate=DS.DEFAULT_SAMPLE_RATE,
+        max_duration=cfg.max_duration,
+    )
 
     # Auto-detect workers if requested using named constant
     worker_count = cfg.num_workers
@@ -718,7 +903,30 @@ def main() -> None:
             worker_count = get_optimal_worker_count()
         print(f"Auto-detected {worker_count} dataloader workers.")
 
-    train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=worker_count, collate_fn=ctc_collate, pin_memory=MambaTrainingConstants.DEFAULT_PIN_MEMORY)
+    train_batch_sampler: DurationBucketBatchSampler | None = None
+    if cfg.bucket_size_multiplier > 0:
+        train_batch_sampler = DurationBucketBatchSampler(
+            durations=[duration for _, duration, _ in train_ds.rows],
+            batch_size=cfg.batch_size,
+            bucket_size_multiplier=cfg.bucket_size_multiplier,
+            seed=cfg.seed,
+        )
+        train_loader = DataLoader(
+            train_ds,
+            batch_sampler=train_batch_sampler,
+            num_workers=worker_count,
+            collate_fn=ctc_collate,
+            pin_memory=MambaTrainingConstants.DEFAULT_PIN_MEMORY,
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            num_workers=worker_count,
+            collate_fn=ctc_collate,
+            pin_memory=MambaTrainingConstants.DEFAULT_PIN_MEMORY,
+        )
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=worker_count, collate_fn=ctc_collate, pin_memory=MambaTrainingConstants.DEFAULT_PIN_MEMORY)
 
     # Model
@@ -734,22 +942,91 @@ def main() -> None:
     # Loss and optimizer using named constants
     criterion = nn.CTCLoss(blank=MambaTrainingConstants.CTC_BLANK_TOKEN_ID, zero_infinity=MambaTrainingConstants.CTC_ZERO_INFINITY)
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(MambaTrainingConstants.COSINE_SCHEDULER_T_MAX_FALLBACK, cfg.epochs))
+    if cfg.scheduler == "constant":
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
+    else:
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(
+                MambaTrainingConstants.COSINE_SCHEDULER_T_MAX_FALLBACK,
+                cfg.epochs,
+            ),
+        )
 
     ckpt_dir = Path(cfg.checkpoint_dir)
     last_ckpt = ckpt_dir / MambaTrainingConstants.LAST_CHECKPOINT_NAME
     best_ckpt = ckpt_dir / MambaTrainingConstants.BEST_CHECKPOINT_NAME
+    metrics_path = Path(cfg.metrics_csv) if cfg.metrics_csv else ckpt_dir / "metrics.csv"
 
     best_val_cer: float | None = None
+    best_val_wer: float | None = None
+    start_epoch = 1
+    global_step = 0
+    if args.resume:
+        resume_path = Path(args.resume)
+        if not resume_path.is_file():
+            raise SystemExit(f"resume checkpoint not found: {resume_path}")
+        try:
+            resume = torch.load(resume_path, map_location=device, weights_only=True)
+        except TypeError:
+            resume = torch.load(resume_path, map_location=device)
+        model.load_state_dict(resume["state_dict"], strict=True)
+        best_val_cer = resume.get("best_cer")
+        best_val_wer = resume.get("best_wer")
+        start_epoch = int(resume.get("epoch") or 0) + 1
+        global_step = int(resume.get("global_step") or 0)
+        if args.reset_optimizer:
+            optimizer = optim.AdamW(
+                filter(lambda parameter: parameter.requires_grad, model.parameters()),
+                lr=cfg.lr,
+                weight_decay=cfg.weight_decay,
+            )
+            if cfg.scheduler == "constant":
+                scheduler = optim.lr_scheduler.LambdaLR(
+                    optimizer,
+                    lambda _: 1.0,
+                )
+            else:
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer,
+                    T_max=max(
+                        MambaTrainingConstants.COSINE_SCHEDULER_T_MAX_FALLBACK,
+                        cfg.epochs - start_epoch + 1,
+                    ),
+                )
+            print(
+                f"Reset optimizer/scheduler at lr={cfg.lr:g} "
+                f"scheduler={cfg.scheduler}"
+            )
+        else:
+            optimizer.load_state_dict(resume["optim_state"])
+            if "scheduler_state" in resume:
+                scheduler.load_state_dict(resume["scheduler_state"])
+        print(
+            f"Resumed {resume_path} at epoch={start_epoch} "
+            f"global_step={global_step}"
+        )
+    if train_batch_sampler is not None:
+        train_batch_sampler.epoch = start_epoch - 1
 
     # Training loop
-    for epoch in range(1, cfg.epochs + 1):
+    nonfinite_loss_count = 0
+    nonfinite_gradient_count = 0
+    invalid_sample_count = 0
+    empty_valid_batch_count = 0
+    stop_training = False
+    for epoch in range(start_epoch, cfg.epochs + 1):
         model.train()
         epoch_losses: List[float] = []
         epoch_start = time.time()
         perf = PerformanceMonitor(log_every=max(MambaTrainingConstants.MINIMUM_PERFORMANCE_LOG_INTERVAL, cfg.log_interval))
 
         for step, (feats, feat_lens, targets, target_lens, _) in enumerate(train_loader, start=1):
+            global_step += 1
+            if cfg.max_steps and global_step > cfg.max_steps:
+                global_step -= 1
+                stop_training = True
+                break
             perf.batch_fetch_started()
             feats = feats.to(device)
             feat_lens = feat_lens.to(device)
@@ -759,18 +1036,15 @@ def main() -> None:
             perf.train_step_started()
             logits_29, out_lens = model(feats, feat_lens)          # (B, T', 29)
 
-            # Filter invalid samples for CTC: target_len>0 and input_len>=target_len
-            starts = torch.cat([
-                torch.zeros(1, dtype=torch.long, device=target_lens.device),
-                target_lens[:-1].cumsum(dim=0),
-            ])
-            ends = starts + target_lens
-            good_idx: List[int] = []
-            for i in range(feats.size(0)):
-                if target_lens[i].item() > 0 and out_lens[i].item() >= target_lens[i].item():
-                    good_idx.append(i)
+            good_idx, starts, ends = ctc_valid_indices(
+                targets,
+                target_lens,
+                out_lens,
+            )
+            invalid_sample_count += feats.size(0) - len(good_idx)
             if len(good_idx) == 0:
                 # Skip batch with no valid CTC pairs
+                empty_valid_batch_count += 1
                 continue
             sel_targets: List[torch.Tensor] = []
             for i in good_idx:
@@ -785,19 +1059,46 @@ def main() -> None:
             loss = criterion(logp, targets_sel, out_lens_sel, tgt_lens_sel)
 
             # Guard against NaNs/Infs before zeroing previous gradients
-            if not torch.isfinite(loss):
-                continue
+            if not bool(torch.isfinite(loss).item()):
+                nonfinite_loss_count += 1
+                raise RuntimeError(
+                    f"non-finite CTC loss at global_step={global_step} "
+                    f"epoch={epoch} batch_step={step}; refusing to skip"
+                )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            if math.isfinite(cfg.grad_clip) and cfg.grad_clip > 0:
-                nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            clip_limit = (
+                cfg.grad_clip
+                if math.isfinite(cfg.grad_clip) and cfg.grad_clip > 0
+                else float("inf")
+            )
+            gradient_norm = nn.utils.clip_grad_norm_(
+                model.parameters(),
+                clip_limit,
+            )
+            if not bool(torch.isfinite(gradient_norm).item()):
+                nonfinite_gradient_count += 1
+                optimizer.zero_grad(set_to_none=True)
+                raise RuntimeError(
+                    f"non-finite gradient norm at global_step={global_step} "
+                    f"epoch={epoch} batch_step={step}; refusing to step"
+                )
             optimizer.step()
 
             epoch_losses.append(float(loss.item()))
             if step % cfg.log_interval == 0:
-                avg_loss = sum(epoch_losses[-cfg.log_interval:]) / min(cfg.log_interval, len(epoch_losses))
-                print(f"Epoch {epoch:02d} Step {step:05d} | Loss {avg_loss:.4f}")
+                recent_losses = epoch_losses[-cfg.log_interval:]
+                if recent_losses:
+                    avg_loss = sum(recent_losses) / len(recent_losses)
+                    print(
+                        f"Epoch {epoch:02d} Step {step:05d} | "
+                        f"Loss {avg_loss:.4f} | "
+                        f"GradNormPreClip {float(gradient_norm.item()):.4f}"
+                    )
             perf.maybe_log(step)
+            if cfg.max_steps and global_step >= cfg.max_steps:
+                stop_training = True
+                break
 
         scheduler.step()
 
@@ -808,20 +1109,95 @@ def main() -> None:
         avg_epoch_loss = sum(epoch_losses) / max(1, len(epoch_losses))
         print(f"Epoch {epoch:02d} done | Avg Loss {avg_epoch_loss:.4f} | Time {elapsed:.1f}s")
 
-        # Save "last" checkpoint every epoch
-        save_checkpoint(last_ckpt, model, optimizer, cfg, best_cer=best_val_cer, epoch=epoch)
-
         # Validation
+        val_loss: float | None = None
+        val_cer: float | None = None
+        val_wer: float | None = None
         if (epoch % cfg.eval_every_epochs) == 0:
-            val_loss, val_cer = run_validation(model, criterion, val_loader, device, tokenizer)
-            print(f"Validation | Loss {val_loss:.4f} | CER {val_cer:.4f}")
-            # Track best by CER
-            if best_val_cer is None or val_cer < best_val_cer:
+            val_loss, val_cer, val_wer = run_validation(
+                model,
+                criterion,
+                val_loader,
+                device,
+                tokenizer,
+            )
+            print(
+                f"Validation | Loss {val_loss:.4f} | "
+                f"CER {val_cer:.4f} | WER {val_wer:.4f}"
+            )
+            improved = (
+                best_val_wer is None
+                or val_wer < best_val_wer
+                or (
+                    val_wer == best_val_wer
+                    and (best_val_cer is None or val_cer < best_val_cer)
+                )
+            )
+            if improved:
                 best_val_cer = val_cer
-                save_checkpoint(best_ckpt, model, optimizer, cfg, best_cer=best_val_cer, epoch=epoch)
-                print(f"New best CER {best_val_cer:.4f} at epoch {epoch}; saved {best_ckpt}")
+                best_val_wer = val_wer
+                save_checkpoint(
+                    best_ckpt,
+                    model,
+                    optimizer,
+                    scheduler,
+                    cfg,
+                    best_cer=best_val_cer,
+                    best_wer=best_val_wer,
+                    epoch=epoch,
+                    global_step=global_step,
+                )
+                print(
+                    f"New best WER {best_val_wer:.4f} "
+                    f"(CER {best_val_cer:.4f}) at epoch {epoch}; "
+                    f"saved {best_ckpt}"
+                )
+            if cfg.target_wer >= 0 and val_wer <= cfg.target_wer:
+                stop_training = True
+                print(
+                    f"Target WER reached: {val_wer:.4f} "
+                    f"<= {cfg.target_wer:.4f}"
+                )
 
-    print("Training complete.")
+        append_metrics_row(
+            metrics_path,
+            {
+                "epoch": epoch,
+                "global_step": global_step,
+                "train_loss": f"{avg_epoch_loss:.8f}",
+                "val_loss": "" if val_loss is None else f"{val_loss:.8f}",
+                "val_cer": "" if val_cer is None else f"{val_cer:.8f}",
+                "val_wer": "" if val_wer is None else f"{val_wer:.8f}",
+                "learning_rate": f"{optimizer.param_groups[0]['lr']:.10g}",
+                "epoch_seconds": f"{elapsed:.3f}",
+                "nonfinite_losses": nonfinite_loss_count,
+                "nonfinite_gradients": nonfinite_gradient_count,
+                "invalid_samples": invalid_sample_count,
+            },
+        )
+        save_checkpoint(
+            last_ckpt,
+            model,
+            optimizer,
+            scheduler,
+            cfg,
+            best_cer=best_val_cer,
+            best_wer=best_val_wer,
+            epoch=epoch,
+            global_step=global_step,
+        )
+
+        if stop_training:
+            break
+
+    print(
+        "Training complete. "
+        f"global_steps={global_step} "
+        f"nonfinite_losses={nonfinite_loss_count} "
+        f"nonfinite_gradients={nonfinite_gradient_count} "
+        f"invalid_samples={invalid_sample_count} "
+        f"empty_valid_batches={empty_valid_batch_count}"
+    )
 
 
 if __name__ == "__main__":
