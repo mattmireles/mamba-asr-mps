@@ -88,3 +88,10 @@ Read [references/index.md](references/index.md) first.
   to consolidate it without note sprawl.
 - Hand off to `guide-ingest` if the task is importing external research into a
   new guide.
+
+## Prose Wrapping
+
+- Do not hard-wrap ordinary Markdown prose at a fixed column. Keep each paragraph on one source line unless Markdown semantics or a document format requires breaks (for example, lists, tables, code, blockquotes, or fixed-width email/plain-text output).
+- Treat editor and browser word wrap as presentation, not a reason to insert newlines.
+- Do not reflow prose merely to satisfy Markdownlint MD013. Disable or configure that rule for prose-heavy documentation when appropriate.
+- Preserve existing paragraph line structure when editing unrelated text; avoid drive-by reflow.
