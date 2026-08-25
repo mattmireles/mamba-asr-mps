@@ -821,3 +821,20 @@ observable gates ran against the final Phase 2 source:
 | Full-dev accuracy gate | WER `0.612790`; threshold `0.25`; expected exit 3 |
 | Scope/artifact check | checkpoints, exports, and Swift build output remain gitignored; `requirements-ci.txt` unchanged |
 | Whitespace check | `git diff --check` exit 0 |
+
+#### Git Handoff
+
+Phase 2 source, evidence, scale-up decision, and plan closeout are committed
+locally as `5622607` (`feat: harden CTC training and record accuracy stop`).
+At closeout, `main` was five commits ahead of `origin/main`. The execute-plan
+push/CI step did not run because the plan stopped before Phase 3 and reserves
+remote integration for completion of every phase.
+
+`COORD-AGENTS.md` remains a pre-existing unrelated worktree modification and
+was deliberately excluded from every phase commit. Checkpoints, decoded
+corpora, metrics CSVs, and Core ML audit artifacts remain local and
+gitignored.
+
+Not testable: this branch-divergence snapshot is time-specific. It was
+verified at closeout with `git status --short --branch` and
+`git log -1 --oneline`.
