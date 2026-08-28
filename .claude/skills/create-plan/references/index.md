@@ -5,7 +5,7 @@ Canonical docs for `create-plan`.
 - `README/Skills/plan-workflow-skills-guide.md`
   Read first for the shared workflow contract, the required research order, and
   the repo's mechanical gate.
-- `README/Templates/Plans-template.md`
+- `assets/Plans-template.md` (canonical; README/Templates is a symlink)
   Read for the exact structure and required sections of the final plan.
 
 Use **`README/Skills/`** when the plan touches repo skills, routing, or skill
