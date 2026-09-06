@@ -93,3 +93,10 @@ Read [references/index.md](references/index.md) first.
   instead of notes.
 - Hand off to `guide-ingest` when the material is externally researched
   reference content, not a local investigation trail.
+
+Never write a plan execution log here. Phase progress belongs only in the
+plan's task checkboxes; the plan header states only its overall lifecycle
+(`Planned`, `In-Progress`, or `Complete`). Routine test and review output is
+transient; Git and CI are the evidence. Create a separate artifact only for an
+important external fact that cannot be reproduced from the commit. Store it
+under `README/Notes/receipts/plan-NNN/`.

@@ -79,6 +79,8 @@ finding, not evidence.
 
 ## Output Contract
 
+- Return the audit to the caller or chat. Do not create a routine evidence artifact, append an execution summary to the plan, or write audit output under `README/`.
+
 - Findings first.
 - Severity ordered.
 - Concrete file references when applicable.
