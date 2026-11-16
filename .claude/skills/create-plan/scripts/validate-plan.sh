@@ -254,7 +254,7 @@ if [ "$enforce_assignments" -eq 1 ]; then
       else if ($0 !~ /\[Trivial \| Moderate \| Hard \| Mega hard\]/) difficulty = 1
     }
     in_impl && /^\|/ {
-      if ($0 ~ /\|[[:space:]]*(Haiku \/ Luna|Sonnet \/ Sol|Opus \/ Astra)[[:space:]]*\|[[:space:]]*(low|medium|high|max)[[:space:]]*\|/) {
+      if ($0 ~ /\|[[:space:]]*(Haiku \/ Luna( \/ Hydrogen)?|Sonnet \/ Sol( \/ Argon)?|Opus \/ Astra( \/ Carbon)?|Hydrogen|Argon|Carbon)[[:space:]]*\|[[:space:]]*(low|medium|high|max)[[:space:]]*\|/) {
         if (allow_placeholders == "--allow-placeholders" \
           || $0 !~ /\[Whole phase, or a sub-task that differs\]/) assignment = 1
       }

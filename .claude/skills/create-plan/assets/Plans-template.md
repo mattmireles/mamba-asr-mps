@@ -100,10 +100,16 @@ High-level approach before diving into phases. Include a simple diagram if helpf
 > row above the default, since the default is correct for most work.
 
 Model pairs name the Claude model and its Codex counterpart, either side
-acceptable: **Sonnet / Sol** (Claude Sonnet 5.5, GPT-6.1 Sol) is the default;
-**Opus / Astra** (Claude Opus 5.5, GPT-6 Astra) handles hard and mega-hard work.
-Use **Haiku / Luna** (Claude Haiku 5.5, GPT-6 Luna) for truly easy, fully
-specified tasks. These are owner-defined equivalent pairs; Terra is not a route.
+acceptable, with Gemini 4 equivalents mapped alongside: **Sonnet / Sol**
+(Claude Sonnet 5.5, GPT-6.1 Sol; Gemini 4: **Argon** for everyday frontier
+work, or **Hydrogen** at higher thinking) is the default; **Opus / Astra**
+(Claude Opus 5.5, GPT-6 Astra; Gemini 4: **Carbon** for max-deliberation /
+Fable-level work, or **Argon** for standard Opus-tier work) handles hard and
+mega-hard work. Use **Haiku / Luna** (Claude Haiku 5.5, GPT-6 Luna; Gemini 4:
+**Hydrogen**) for truly easy, fully specified tasks. Note that Argon is a full
+frontier model rather than a mid-tier Sonnet, and Carbon is post-trained on
+Argon for deeper verification/reasoning. These are owner-defined equivalent
+tiers; Terra is not a route.
 
 ### Phase 0: Prerequisites
 
@@ -115,7 +121,7 @@ specified tasks. These are owner-defined equivalent pairs; Terra is not a route.
 
 | Sub-task | Model | Effort |
 | --- | --- | --- |
-| [Whole phase, or a sub-task that differs] | Sonnet / Sol | medium |
+| [Whole phase, or a sub-task that differs] | Sonnet / Sol / Argon | medium |
 
 
 **Tasks:**
@@ -137,7 +143,7 @@ specified tasks. These are owner-defined equivalent pairs; Terra is not a route.
 
 | Sub-task | Model | Effort |
 | --- | --- | --- |
-| [Whole phase, or a sub-task that differs] | Sonnet / Sol | medium |
+| [Whole phase, or a sub-task that differs] | Sonnet / Sol / Argon | medium |
 
 
 **Tasks:**
@@ -159,7 +165,7 @@ specified tasks. These are owner-defined equivalent pairs; Terra is not a route.
 
 | Sub-task | Model | Effort |
 | --- | --- | --- |
-| [Whole phase, or a sub-task that differs] | Sonnet / Sol | medium |
+| [Whole phase, or a sub-task that differs] | Sonnet / Sol / Argon | medium |
 
 
 **Tasks:**
@@ -181,7 +187,7 @@ specified tasks. These are owner-defined equivalent pairs; Terra is not a route.
 
 | Sub-task | Model | Effort |
 | --- | --- | --- |
-| [Whole phase, or a sub-task that differs] | Sonnet / Sol | medium |
+| [Whole phase, or a sub-task that differs] | Sonnet / Sol / Argon | medium |
 
 
 **Tasks:**
@@ -369,7 +375,7 @@ interface NewOrModifiedType {
 
 | Sub-task | Model | Effort |
 | --- | --- | --- |
-| [Whole phase, or a sub-task that differs] | Sonnet / Sol | medium |
+| [Whole phase, or a sub-task that differs] | Sonnet / Sol / Argon | medium |
 
 
 ```

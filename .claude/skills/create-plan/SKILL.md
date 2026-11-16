@@ -18,11 +18,16 @@ Every numbered phase must also carry a **Difficulty:** line and a
 and moves independently of the model: a fully specified step can warrant high
 effort on the default model, and a genuinely novel build warrants a stronger
 model before the effort dial is touched. `Sonnet / Sol` (Claude Sonnet 5.5 /
-GPT-6.1 Sol) is the default;
-`Opus / Astra` (Claude Opus 5.5 / GPT-6 Astra) handles hard and mega-hard work.
+GPT-6.1 Sol; Gemini 4 counterpart: **Argon** for everyday frontier work, or
+**Hydrogen** at higher thinking) is the default;
+`Opus / Astra` (Claude Opus 5.5 / GPT-6 Astra; Gemini 4 counterpart: **Carbon**
+for max-deliberation / Fable-level work, or **Argon** for standard Opus-tier
+work) handles hard and mega-hard work.
 For truly easy, fully specified tasks use `Haiku / Luna` (Claude Haiku 5.5 /
-GPT-6 Luna). These are owner-defined equivalent pairs; Terra is not a model
-route. Justify every row above the default. A sub-task that decides *whether a gate
+GPT-6 Luna; Gemini 4 counterpart: **Hydrogen**). These are owner-defined
+equivalent tiers (note: Argon is a full frontier model rather than a mid-tier
+Sonnet, and Carbon is post-trained on Argon for deeper thinking); Terra is not
+a model route. Justify every row above the default. A sub-task that decides *whether a gate
 passed*, rather than executing an already-specified step, moves up the model
 ladder rather than only up the effort dial. Split a phase into rows only where
 the rows actually differ. The validator enforces both fields on plans numbered 35 or later; earlier plans keep legacy behavior until deliberately migrated.
