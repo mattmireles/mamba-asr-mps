@@ -20,7 +20,7 @@ effort on the default model, and a genuinely novel build warrants a stronger
 model before the effort dial is touched. `Sonnet / Sol` (Claude Sonnet 5.5 /
 GPT-6.1 Sol; Gemini 4 counterpart: **Argon** for everyday frontier work, or
 **Hydrogen** at higher thinking) is the default;
-`Opus / Astra` (Claude Opus 5.5 / GPT Astra 6.2; Gemini 4 counterpart: **Carbon**
+`Opus / Astra` (Claude Opus 5.5 / GPT-6.2 Astra; Gemini 4 counterpart: **Carbon**
 for max-deliberation / Fable-level work, or **Argon** for standard Opus-tier
 work) handles hard and mega-hard work.
 For truly easy, fully specified tasks use `Haiku / Luna` (Claude Haiku 5.5 /
