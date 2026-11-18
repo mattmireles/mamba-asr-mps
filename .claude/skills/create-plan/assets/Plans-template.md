@@ -103,7 +103,7 @@ Model pairs name the Claude model and its Codex counterpart, either side
 acceptable, with Gemini 4 equivalents mapped alongside: **Sonnet / Sol**
 (Claude Sonnet 5.5, GPT-6.1 Sol; Gemini 4: **Argon** for everyday frontier
 work, or **Hydrogen** at higher thinking) is the default; **Opus / Astra**
-(Claude Opus 5.5, GPT-6 Astra; Gemini 4: **Carbon** for max-deliberation /
+(Claude Opus 5.5, GPT Astra 6.2; Gemini 4: **Carbon** for max-deliberation /
 Fable-level work, or **Argon** for standard Opus-tier work) handles hard and
 mega-hard work. Use **Haiku / Luna** (Claude Haiku 5.5, GPT-6 Luna; Gemini 4:
 **Hydrogen**) for truly easy, fully specified tasks. Note that Argon is a full
